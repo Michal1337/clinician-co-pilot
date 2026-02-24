@@ -1,9 +1,7 @@
-import copy
+import json
 import warnings
 from typing import Any, Dict, List, Literal, TypedDict
 
-import librosa
-import torch
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langgraph.graph import END, START, StateGraph
@@ -18,10 +16,15 @@ from utils import *
 warnings.filterwarnings("ignore")
 
 
-MAX_STEPS = 2
+MAX_STEPS = 5
 
-text_vectorstore = FAISS.load_local("../data/vdbs/text_vdb", TEXT_EMBEDDINGS, allow_dangerous_deserialization=True)
-image_vectorstore = FAISS.load_local("../data/vdbs/img_vdb", IMAGE_EMBEDDINGS, allow_dangerous_deserialization=True)
+text_vectorstore = FAISS.load_local(
+    "../data/vdbs/text_vdb", TEXT_EMBEDDINGS, allow_dangerous_deserialization=True
+)
+image_vectorstore = FAISS.load_local(
+    "../data/vdbs/img_vdb", IMAGE_EMBEDDINGS, allow_dangerous_deserialization=True
+)
+
 
 class AgentState(TypedDict):
     subject_id: int
@@ -46,38 +49,47 @@ class AgentState(TypedDict):
     # Stage 3
     audio_chunk: np.ndarray
     transcript_chunk: str
-    full_transcript: List[str]
+    full_transcript: str
     conversation_summary: str
 
 
 def node_reason_and_plan(state: AgentState) -> Dict:
     if state["step"] >= MAX_STEPS:
-        return {"action": "finish", "query": None, "action_history": state["action_history"] + ["finish"]}
-    
+        return {
+            "action": "finish",
+            "query": None,
+            "action_history": state["action_history"] + ["finish"],
+        }
+
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_REASON_AND_PLAN.format(summary=state["summary"], action_history=state["action_history"])}
+                {
+                    "type": "text",
+                    "text": PROMPT_REASON_AND_PLAN.format(
+                        summary=state["summary"], action_history=state["action_history"]
+                    ),
+                }
             ],
         },
     ]
-
     response = PIPE(messages, do_sample=False, max_new_tokens=2000)
     clean = extract_response_json(response[0]["generated_text"][-1]["content"])
-    plan = eval(clean)
-    
+    plan = json.loads(clean)
+    print(plan)
     return {
         "action": plan["action"],
         "query": plan["query"],
         "allowed_years": plan.get("allowed_years", None),
         "action_history": state["action_history"] + [plan],
-        "step": state["step"] + 1
+        "step": state["step"] + 1,
     }
+
 
 def node_text_vector_search(state: AgentState) -> Dict:
     candidates = text_vectorstore.similarity_search_with_relevance_scores(
-        state["query"], k=50, filter = {"subject_id": state["subject_id"]}
+        state["query"], k=50, filter={"subject_id": state["subject_id"]}
     )
     results = []
     for doc, sim_score in candidates:
@@ -91,129 +103,199 @@ def node_text_vector_search(state: AgentState) -> Dict:
         # Combine semantic + temporal
         final_score = sim_score * time_weight
 
-        results.append({
-            "doc": doc,
-            "final_score": final_score
-        })
+        results.append({"doc": doc, "final_score": final_score})
 
     results.sort(key=lambda x: x["final_score"], reverse=True)
-    retrieved_docs_new = [r["doc"] for r in results[:state["num_retriev_text"]]]
+    retrieved_docs_new = [r["doc"] for r in results[: state["num_retriev_text"]]]
 
-    retrieved_docs_str = "\n\n".join(f"Document {i+1}:\n{textdoc2str(doc)}"
+    retrieved_docs_str = "\n\n".join(
+        f"Document {i+1}:\n{textdoc2str(doc)}"
         for i, doc in enumerate(retrieved_docs_new)
     )
     retrieved_docs = state["retrieved_docs"]
     retrieved_docs.append(retrieved_docs_new)
-    
+
     return {"retrieved_docs": retrieved_docs, "retrieved_docs_str": retrieved_docs_str}
+
 
 def node_image_vector_search(state: AgentState) -> Dict:
-    retrieved_docs_new = image_vectorstore.similarity_search(state["query"], k=state["num_retriev_img"], filter = {"subject_id": state["subject_id"]})
+    retrieved_docs_new = image_vectorstore.similarity_search(
+        state["query"],
+        k=state["num_retriev_img"],
+        filter={"subject_id": state["subject_id"]},
+    )
     retrieved_docs_str = "\n\n".join(imagedoc2str(doc) for doc in retrieved_docs_new)
-    
+
     retrieved_docs = state["retrieved_docs"]
     retrieved_docs.append(retrieved_docs_new)
-    
+
     return {"retrieved_docs": retrieved_docs, "retrieved_docs_str": retrieved_docs_str}
 
+
 def node_update_summary(state: AgentState) -> Dict:
+    current_summary = state["summary"]
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_UPDATE_TEMPLATE.format(retrieved_docs_str=state["retrieved_docs_str"], summary=state["summary"])}
+                {
+                    "type": "text",
+                    "text": PROMPT_UPDATE_TEMPLATE.format(
+                        retrieved_docs_str=state["retrieved_docs_str"],
+                        summary=current_summary,
+                    ),
+                }
             ],
         },
     ]
-    response = PIPE(messages, do_sample=False, max_new_toknes=10_000)
-    clean = extract_response_json(response[0]["generated_text"][-1]["content"])
-    summary = eval(clean)
-    return {"summary": summary}
+    response = PIPE(messages)
+    clean = extract_response_json(response)
+    patch = json.loads(clean)
+    updated_summary = apply_patch(current_summary, patch)
+    return {"summary": updated_summary}
+
 
 def route(state: AgentState) -> str:
     return state["action"]
+
 
 def node_make_query(state: AgentState) -> Dict:
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_RAG_RETRIEVAL.format(summary=state["summary"], chat_history=state["chat_history"], question=state["question"])}
+                {
+                    "type": "text",
+                    "text": PROMPT_RAG_RETRIEVAL.format(
+                        summary=state["summary"],
+                        full_transcript=state["full_transcript"],
+                        chat_history=state["chat_history"],
+                        question=state["question"],
+                    ),
+                }
             ],
         },
     ]
 
     response = PIPE(messages, do_sample=False)
     clean = extract_response_json(response[0]["generated_text"][-1]["content"])
-    plan = eval(clean)
-    
+    plan = json.loads(clean)
+
     return {
         "action": plan["action"],
         "query": plan["query"],
         "allowed_years": plan.get("allowed_years", None),
     }
 
+
 def node_route_answer_llm(state: AgentState) -> Dict:
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_LLM_ROUTER.format(summary=state["summary"], chat_history=state["chat_history"], retrieved_docs_str=state["retrieved_docs_str"], question=state["question"])}
+                {
+                    "type": "text",
+                    "text": PROMPT_LLM_ROUTER.format(
+                        summary=state["summary"],
+                        full_transcript=state["full_transcript"],
+                        chat_history=state["chat_history"],
+                        retrieved_docs_str=state["retrieved_docs_str"],
+                        question=state["question"],
+                    ),
+                }
             ],
         },
     ]
     response = PIPE(messages, do_sample=False)
     clean = extract_response_json(response[0]["generated_text"][-1]["content"])
-    plan = eval(clean)
+    plan = json.loads(clean)
 
     return {"answer_llm": plan["answer_llm"]}
 
 
 def node_answer_question_medgemma(state: AgentState) -> Dict:
     user_prompt = {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"]) if len(state["chat_history"]) > 0 else START_CHAT_PROMPT.format(summary=state["summary"]) + PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"])}
-            ],
-        }
-    
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    PROMPT_RAG.format(
+                        question=state["question"],
+                        full_transcript=state["full_transcript"],
+                        retrieved_docs_str=state["retrieved_docs_str"],
+                    )
+                    if len(state["chat_history"]) > 0
+                    else START_CHAT_PROMPT.format(summary=state["summary"])
+                    + PROMPT_RAG.format(
+                        question=state["question"],
+                        full_transcript=state["full_transcript"],
+                        retrieved_docs_str=state["retrieved_docs_str"],
+                    )
+                ),
+            }
+        ],
+    }
+
     messages = list(state.get("chat_history", []))
     messages.append(user_prompt)
     response = PIPE(messages, do_sample=False)
-    
+
     assistant_reponse = {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": response[0]["generated_text"][-1]["content"]}
-            ],
-        }
-    
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": response[0]["generated_text"][-1]["content"].split(
+                    "<unused95>"
+                )[1],
+            }
+        ],
+    }
+
     messages.append(assistant_reponse)
 
     return {"chat_history": messages}
+
 
 def node_answer_question_txgemma(state: AgentState) -> Dict:
     user_prompt = {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"]) if len(state["chat_history"]) > 0 else START_CHAT_PROMPT.format(summary=state["summary"]) + PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"])}
-            ],
-        }
-    
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    PROMPT_RAG.format(
+                        question=state["question"],
+                        full_transcript=state["full_transcript"],
+                        retrieved_docs_str=state["retrieved_docs_str"],
+                    )
+                    if len(state["chat_history"]) > 0
+                    else START_CHAT_PROMPT.format(summary=state["summary"])
+                    + PROMPT_RAG.format(
+                        question=state["question"],
+                        retrieved_docs_str=state["retrieved_docs_str"],
+                    )
+                ),
+            }
+        ],
+    }
+
     messages = list(state.get("chat_history", []))
     messages.append(user_prompt)
     response = PIPE_TXGEMMA(messages, do_sample=False)
-    
+
     assistant_reponse = {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": response[0]["generated_text"][-1]["content"]}
-            ],
-        }
-    
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": response[0]["generated_text"][-1]["content"]}
+        ],
+    }
+
     messages.append(assistant_reponse)
 
     return {"chat_history": messages}
+
 
 def route_answer_llm(state: AgentState) -> str:
     return state["answer_llm"]
@@ -234,8 +316,8 @@ graph.add_conditional_edges(
     {
         "search_text": "text_vector_search",
         "search_imaging": "image_vector_search",
-        "finish": END
-    }
+        "finish": END,
+    },
 )
 graph.add_edge("text_vector_search", "update_summary")
 graph.add_edge("image_vector_search", "update_summary")
@@ -261,7 +343,7 @@ graph.add_conditional_edges(
     {
         "search_text": "text_vector_search",
         "search_imaging": "image_vector_search",
-    }
+    },
 )
 graph.add_edge("text_vector_search", "route_answer_llm")
 graph.add_edge("image_vector_search", "route_answer_llm")
@@ -271,7 +353,7 @@ graph.add_conditional_edges(
     {
         "medgemma": "answer_question_medgemma",
         "txgemma": "answer_question_txgemma",
-    }
+    },
 )
 graph.add_edge("answer_question_medgemma", END)
 graph.add_edge("answer_question_txgemma", END)
@@ -298,4 +380,4 @@ INITIAL_STATE = {
     "transcript_chunk": "",
     "full_transcript": "",
     "conversation_summary": CONVERSATION_SUMMARY_TEMPLATE,
-    }
+}

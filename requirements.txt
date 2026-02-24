@@ -1,0 +1,7 @@
+transformers
+lanchain
+langgraph
+faiss-cpu
+langchain-text-splitters
+librosa
+torch

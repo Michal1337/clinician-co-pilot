@@ -1,9 +1,6 @@
-import copy
 import warnings
 from typing import Any, Dict, List, Literal, TypedDict
 
-import librosa
-import torch
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langgraph.graph import END, START, StateGraph
@@ -168,7 +165,7 @@ def node_route_answer_llm(state: AgentState) -> Dict:
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_LLM_ROUTER.format(summary=state["summary"], chat_history=state["chat_history"], retrieved_docs_str=state["retrieved_docs_str"], question=state["question"])}
+                {"type": "text", "text": PROMPT_LLM_ROUTER.format(full_transcript=state["full_transcript"], summary=state["summary"], full_transcript=state["full_transcript"], chat_history=state["chat_history"], retrieved_docs_str=state["retrieved_docs_str"], question=state["question"])}
             ],
         },
     ]
@@ -183,7 +180,7 @@ def node_answer_question_medgemma(state: AgentState) -> Dict:
     user_prompt = {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"]) if len(state["chat_history"]) > 0 else START_CHAT_PROMPT.format(summary=state["summary"]) + PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"])}
+                {"type": "text", "text": PROMPT_RAG.format(full_transcript=state["full_transcript"], question=state["question"], retrieved_docs_str=state["retrieved_docs_str"]) if len(state["chat_history"]) > 0 else START_CHAT_PROMPT.format(summary=state["summary"]) + PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"])}
             ],
         }
     
@@ -206,7 +203,7 @@ def node_answer_question_txgemma(state: AgentState) -> Dict:
     user_prompt = {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"]) if len(state["chat_history"]) > 0 else START_CHAT_PROMPT.format(summary=state["summary"]) + PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"])}
+                {"type": "text", "text": PROMPT_RAG.format(full_transcript=state["full_transcript"], question=state["question"], retrieved_docs_str=state["retrieved_docs_str"]) if len(state["chat_history"]) > 0 else START_CHAT_PROMPT.format(summary=state["summary"]) + PROMPT_RAG.format(question=state["question"], retrieved_docs_str=state["retrieved_docs_str"])}
             ],
         }
     
@@ -302,7 +299,7 @@ INITIAL_STATE = {
     "action": "",
     "query": "",
     "allowed_years": None,
-    "retrieved_docs": [],  # list of retrieval-batches
+    "retrieved_docs": [],
     "retrieved_docs_str": "",
     "num_retriev_text": 1,
     "num_retriev_img": 1,
@@ -310,8 +307,8 @@ INITIAL_STATE = {
     "action_history": [],
     "step": 0,
     "question": "",
-    "chat_history": [],  # list of messages
-    "answer_llm": "medgemma",
+    "chat_history": [],
+    "answer_llm": "",
     "audio_chunk": None,
     "transcript_chunk": "",
     "full_transcript": "",

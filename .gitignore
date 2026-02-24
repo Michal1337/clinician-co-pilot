@@ -1,2 +1,4 @@
 __pycache__
-data
+data/cxrs
+data/vdbs
+data/*.json

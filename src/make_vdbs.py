@@ -16,9 +16,7 @@ subject_id = history["subject_id"]
 
 # Text splitter ONLY for discharge summaries
 splitter = RecursiveCharacterTextSplitter(
-    chunk_size=224,
-    chunk_overlap=48,
-    length_function= lambda x: len(x.split())
+    chunk_size=128, chunk_overlap=32, length_function=lambda x: len(x.split())
 )
 
 img_documents = []
@@ -42,8 +40,8 @@ for adm in history["admissions"]:
                 metadata={
                     **base_metadata,
                     "section": "diagnoses",
-                    "document_id": str(uuid.uuid4())
-                }
+                    "document_id": str(uuid.uuid4()),
+                },
             )
         )
 
@@ -56,8 +54,8 @@ for adm in history["admissions"]:
                 metadata={
                     **base_metadata,
                     "section": "procedures",
-                    "document_id": str(uuid.uuid4())
-                }
+                    "document_id": str(uuid.uuid4()),
+                },
             )
         )
 
@@ -70,8 +68,8 @@ for adm in history["admissions"]:
                 metadata={
                     **base_metadata,
                     "section": "medications",
-                    "document_id": str(uuid.uuid4())
-                }
+                    "document_id": str(uuid.uuid4()),
+                },
             )
         )
 
@@ -89,8 +87,8 @@ for adm in history["admissions"]:
                 metadata={
                     **base_metadata,
                     "section": "lab_summary",
-                    "document_id": str(uuid.uuid4())
-                }
+                    "document_id": str(uuid.uuid4()),
+                },
             )
         )
 
@@ -107,8 +105,8 @@ for adm in history["admissions"]:
                         **base_metadata,
                         "section": "discharge_summary",
                         "chunk_id": i,
-                        "document_id": str(uuid.uuid4())
-                    }
+                        "document_id": str(uuid.uuid4()),
+                    },
                 )
             )
 
@@ -126,7 +124,7 @@ for study in history["xray_studies"]:
                 "impression": study.get("impression"),
                 "study_date": study.get("study_date"),
                 "study_time": study.get("study_time"),
-            }
+            },
         )
     )
 
@@ -145,6 +143,3 @@ img_vectorstore = FAISS.from_documents(
 )
 
 img_vectorstore.save_local("../data/vdbs/img_vdb")
-
-
-

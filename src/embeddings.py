@@ -19,21 +19,23 @@ class MedSigLIPEmbeddings(Embeddings):
         inputs = self.processor(images=images, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
-            embeddings = self.model.get_image_features(**inputs)['pooler_output']
-        
+            embeddings = self.model.get_image_features(**inputs)["pooler_output"]
+
         embeddings = embeddings / embeddings.norm(p=2, dim=-1, keepdim=True)
         return embeddings.cpu().numpy()
 
     def embed_query(self, text):
-        inputs = self.processor(text=text, return_tensors="pt", padding=True).to(self.device)
+        inputs = self.processor(text=text, return_tensors="pt", padding=True).to(
+            self.device
+        )
 
         with torch.no_grad():
-            embeddings = self.model.get_text_features(**inputs)['pooler_output']
-        
+            embeddings = self.model.get_text_features(**inputs)["pooler_output"]
+
         embeddings = embeddings / embeddings.norm(p=2, dim=-1, keepdim=True)
         return embeddings.cpu().numpy()[0]
 
-    
+
 class ClinicalBERTEmbeddings(Embeddings):
     def __init__(
         self,
@@ -79,7 +81,7 @@ class ClinicalBERTEmbeddings(Embeddings):
     def _embed(self, texts: List[str]):
         all_embeddings = []
         for i in range(0, len(texts), self.batch_size):
-            batch_texts = texts[i:i + self.batch_size]
+            batch_texts = texts[i : i + self.batch_size]
             batch_embeddings = self._embed_batch(batch_texts)
             all_embeddings.append(batch_embeddings)
 
@@ -92,5 +94,5 @@ class ClinicalBERTEmbeddings(Embeddings):
         return self._embed([text])[0]
 
 
-TEXT_EMBEDDINGS = ClinicalBERTEmbeddings("../../biobert", "cuda:0")
-IMAGE_EMBEDDINGS = MedSigLIPEmbeddings(model_name="../../medsiglip/", device="cuda:0")
+TEXT_EMBEDDINGS = ClinicalBERTEmbeddings(device="cuda:2")
+IMAGE_EMBEDDINGS = MedSigLIPEmbeddings(device="cuda:2")

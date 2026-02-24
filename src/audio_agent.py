@@ -1,4 +1,4 @@
-import warnings
+import json
 from typing import Any, Dict, List, Literal, TypedDict
 
 import numpy as np
@@ -7,15 +7,14 @@ from langgraph.graph import END, START, StateGraph
 
 from models import PIPE, PIPE_ASR
 from prompts import PROMPT_SUMMARIZE_TRANSCRIPTION
-from utils import extract_response_json, normalize_medasr
-
-warnings.filterwarnings("ignore")
-
+from utils import extract_response_json
 
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 10
 CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_SECONDS
-STEP_SAMPLES = CHUNK_SAMPLES - int(SAMPLE_RATE * 0.5) 
+OVERLAP_RATIO = 0.1  # 10% overlap
+STEP_SAMPLES = int(CHUNK_SAMPLES * (1 - OVERLAP_RATIO))
+
 
 class AgentState(TypedDict):
     subject_id: int
@@ -50,26 +49,32 @@ def node_transcribe(state: AgentState):
     result = PIPE_ASR(waveform, sampling_rate=SAMPLE_RATE)
     text = result["text"]
 
-    updated_transcript = normalize_medasr(state["full_transcript"] + text)
+    updated_transcript = state["full_transcript"] + text[:-4]
 
-    return {
-        "transcript_chunk": text,
-        "full_transcript": updated_transcript
-    }
+    return {"transcript_chunk": text, "full_transcript": updated_transcript}
+
 
 def node_summarize(state: AgentState):
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT_SUMMARIZE_TRANSCRIPTION.format(full_text=state["full_transcript"], conversation_summary=state["conversation_summary"])}
+                {
+                    "type": "text",
+                    "text": PROMPT_SUMMARIZE_TRANSCRIPTION.format(
+                        full_text=state["full_transcript"],
+                        conversation_summary=state["conversation_summary"],
+                    ),
+                }
             ],
         },
     ]
 
     response = PIPE(messages, max_new_tokens=4000)
     output = extract_response_json(response[0]["generated_text"][-1]["content"])
-    return {"conversation_summary": output}
+    summary = json.loads(output)
+    return {"conversation_summary": summary}
+
 
 graph = StateGraph(AgentState)
 graph.add_node("transcribe", node_transcribe)
