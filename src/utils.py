@@ -1,3 +1,4 @@
+import os
 import math
 import re
 from datetime import datetime
@@ -35,11 +36,62 @@ def textdoc2str(doc):
 
 
 def imagedoc2str(doc):
-    res = "\n".join(
-        f"{item2str[item]}: {doc.metadata[item]}"
-        for item in ["doc_id", "date", "impression", "findings"]
+    source_id = (
+        doc.metadata.get("doc_id")
+        or doc.metadata.get("document_id")
+        or doc.metadata.get("dicom_id")
+        or doc.metadata.get("study_id")
+        or "N/A"
+    )
+    study_date = (
+        doc.metadata.get("date")
+        or doc.metadata.get("study_date")
+        or doc.metadata.get("admittime")
+        or "N/A"
+    )
+    impression = doc.metadata.get("impression") or "N/A"
+    findings = doc.metadata.get("findings") or "N/A"
+    res = (
+        f"Document ID: {source_id}\n"
+        f"Study Date: {study_date}\n"
+        f"Xray Impression: {impression}\n"
+        f"Xray Findings: {findings}"
     )
     return res
+
+
+def add_images_to_user_content(content, retrieved_docs, max_images=3):
+    """
+    Add image entries to user message content for multimodal models.
+    Images are inserted before text blocks as recommended by Gemma 4 docs.
+    """
+    if not isinstance(content, list):
+        return content
+
+    image_entries = []
+    seen_paths = set()
+
+    for doc in (retrieved_docs or []):
+        path = None
+        if isinstance(getattr(doc, "page_content", None), str) and os.path.exists(
+            doc.page_content
+        ):
+            path = doc.page_content
+        elif hasattr(doc, "metadata") and isinstance(doc.metadata, dict):
+            for key in ["image_path", "main_image_path", "path", "file_path"]:
+                maybe_path = doc.metadata.get(key)
+                if isinstance(maybe_path, str) and os.path.exists(maybe_path):
+                    path = maybe_path
+                    break
+
+        if path and path not in seen_paths:
+            image_entries.append({"type": "image", "url": path})
+            seen_paths.add(path)
+
+        if len(image_entries) >= max_images:
+            break
+
+    return image_entries + content if image_entries else content
 
 
 def windowed_time_decay(

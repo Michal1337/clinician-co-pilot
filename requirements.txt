@@ -1,7 +1,6 @@
 transformers
-lanchain
+langchain
 langgraph
 faiss-cpu
 langchain-text-splitters
 librosa
-torch

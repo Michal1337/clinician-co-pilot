@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 from audio_agent import *
 from embeddings import *
-from models import PIPE, PIPE_TXGEMMA
+from models import PIPE
 from prompts import *
 from templates import *
 from utils import *
@@ -44,7 +44,6 @@ class AgentState(TypedDict):
     # Stage 2
     question: str
     chat_history: List[str]
-    answer_llm: str
 
     # Stage 3
     audio_chunk: np.ndarray
@@ -188,53 +187,32 @@ def node_make_query(state: AgentState) -> Dict:
     }
 
 
-def node_route_answer_llm(state: AgentState) -> Dict:
-    messages = [
+def node_answer_question(state: AgentState) -> Dict:
+    user_content = [
         {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": PROMPT_LLM_ROUTER.format(
-                        summary=state["summary"],
-                        full_transcript=state["full_transcript"],
-                        chat_history=state["chat_history"],
-                        retrieved_docs_str=state["retrieved_docs_str"],
-                        question=state["question"],
-                    ),
-                }
-            ],
-        },
+            "type": "text",
+            "text": (
+                PROMPT_RAG.format(
+                    question=state["question"],
+                    full_transcript=state["full_transcript"],
+                    retrieved_docs_str=state["retrieved_docs_str"],
+                )
+                if len(state["chat_history"]) > 0
+                else START_CHAT_PROMPT.format(summary=state["summary"])
+                + PROMPT_RAG.format(
+                    question=state["question"],
+                    full_transcript=state["full_transcript"],
+                    retrieved_docs_str=state["retrieved_docs_str"],
+                )
+            ),
+        }
     ]
-    response = PIPE(messages, do_sample=False)
-    clean = extract_response_json(response[0]["generated_text"][-1]["content"])
-    plan = json.loads(clean)
+    latest_docs = state["retrieved_docs"][-1] if state.get("retrieved_docs") else []
+    user_content = add_images_to_user_content(user_content, latest_docs)
 
-    return {"answer_llm": plan["answer_llm"]}
-
-
-def node_answer_question_medgemma(state: AgentState) -> Dict:
     user_prompt = {
         "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": (
-                    PROMPT_RAG.format(
-                        question=state["question"],
-                        full_transcript=state["full_transcript"],
-                        retrieved_docs_str=state["retrieved_docs_str"],
-                    )
-                    if len(state["chat_history"]) > 0
-                    else START_CHAT_PROMPT.format(summary=state["summary"])
-                    + PROMPT_RAG.format(
-                        question=state["question"],
-                        full_transcript=state["full_transcript"],
-                        retrieved_docs_str=state["retrieved_docs_str"],
-                    )
-                ),
-            }
-        ],
+        "content": user_content,
     }
 
     messages = list(state.get("chat_history", []))
@@ -256,49 +234,6 @@ def node_answer_question_medgemma(state: AgentState) -> Dict:
     messages.append(assistant_reponse)
 
     return {"chat_history": messages}
-
-
-def node_answer_question_txgemma(state: AgentState) -> Dict:
-    user_prompt = {
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": (
-                    PROMPT_RAG.format(
-                        question=state["question"],
-                        full_transcript=state["full_transcript"],
-                        retrieved_docs_str=state["retrieved_docs_str"],
-                    )
-                    if len(state["chat_history"]) > 0
-                    else START_CHAT_PROMPT.format(summary=state["summary"])
-                    + PROMPT_RAG.format(
-                        question=state["question"],
-                        retrieved_docs_str=state["retrieved_docs_str"],
-                    )
-                ),
-            }
-        ],
-    }
-
-    messages = list(state.get("chat_history", []))
-    messages.append(user_prompt)
-    response = PIPE_TXGEMMA(messages, do_sample=False)
-
-    assistant_reponse = {
-        "role": "assistant",
-        "content": [
-            {"type": "text", "text": response[0]["generated_text"][-1]["content"]}
-        ],
-    }
-
-    messages.append(assistant_reponse)
-
-    return {"chat_history": messages}
-
-
-def route_answer_llm(state: AgentState) -> str:
-    return state["answer_llm"]
 
 
 # Stage 1
@@ -333,9 +268,7 @@ graph.add_edge(START, "make_query")
 graph.add_node("make_query", node_make_query)
 graph.add_node("text_vector_search", node_text_vector_search)
 graph.add_node("image_vector_search", node_image_vector_search)
-graph.add_node("route_answer_llm", node_route_answer_llm)
-graph.add_node("answer_question_medgemma", node_answer_question_medgemma)
-graph.add_node("answer_question_txgemma", node_answer_question_txgemma)
+graph.add_node("answer_question", node_answer_question)
 
 graph.add_conditional_edges(
     "make_query",
@@ -345,18 +278,9 @@ graph.add_conditional_edges(
         "search_imaging": "image_vector_search",
     },
 )
-graph.add_edge("text_vector_search", "route_answer_llm")
-graph.add_edge("image_vector_search", "route_answer_llm")
-graph.add_conditional_edges(
-    "route_answer_llm",
-    route_answer_llm,
-    {
-        "medgemma": "answer_question_medgemma",
-        "txgemma": "answer_question_txgemma",
-    },
-)
-graph.add_edge("answer_question_medgemma", END)
-graph.add_edge("answer_question_txgemma", END)
+graph.add_edge("text_vector_search", "answer_question")
+graph.add_edge("image_vector_search", "answer_question")
+graph.add_edge("answer_question", END)
 
 CHAT_TURN_AGENT = graph.compile()
 # CHAT_TURN_AGENT.get_graph().draw_mermaid_png(output_file_path="../assets/chat_turn_agent.png")
@@ -375,7 +299,6 @@ INITIAL_STATE = {
     "step": 0,
     "question": "",
     "chat_history": [],  # list of messages
-    "answer_llm": "medgemma",
     "audio_chunk": None,
     "transcript_chunk": "",
     "full_transcript": "",

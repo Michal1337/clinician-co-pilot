@@ -34,7 +34,6 @@ class AgentState(TypedDict):
     # Stage 2
     question: str
     chat_history: List[str]
-    answer_llm: str
 
     # Stage 3
     audio_chunk: np.ndarray

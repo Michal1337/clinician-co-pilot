@@ -121,32 +121,6 @@ PROMPT_RAG_RETRIEVAL = (
     '"allowed_years": number (omit only if clearly justified)}}'
 )
 
-PROMPT_LLM_ROUTER = (
-    "PATIENT CLINICAL SUMMARY:\n{summary}\n\n"
-    "LIVE CONVERSATION TRANSCRIPT:\n{full_transcript}\n"
-    "CHAT HISTORY:\n{chat_history}\n\n"
-    "RETRIEVED DOCUMENTS:\n{retrieved_docs_str}\n\n"
-    "LATEST USER QUESTION:\n{question}\n\n"
-    "You are an expert LLM router.\n\n"
-    "Your task is to analyze the patient clinical summary, chat history, "
-    "retrieved documents, and latest user question, "
-    "and decide which model should generate the final answer.\n\n"
-    "Available models:\n"
-    "- medgemma: Use for general medical knowledge, clinical reasoning, "
-    "diagnosis, treatment interpretation, and any physician-level medical question.\n"
-    "- txgemma: Use for specialized therapeutic and drug discovery related tasks, "
-    "including predictive or property analysis (e.g., molecular properties, drug-target interactions), "
-    "conversation about therapeutic development contexts, or other research-focused interactions informed by therapeutic data.\n\n"
-    "Routing rules:\n"
-    "- Prioritize the intent of the latest user question.\n"
-    "- If the question requires broad medical knowledge, clinical interpretation, or patient-centered reasoning → choose medgemma.\n"
-    "- If the question specifically involves therapeutic discovery, drug properties, biological prediction tasks, "
-    "or research-oriented therapeutic dialogue → choose txgemma.\n"
-    "- When in doubt and the question is not therapeutic research-focused, prefer medgemma.\n\n"
-    "Return JSON only using this schema:\n"
-    '{{"answer_llm": "medgemma | txgemma"}}'
-)
-
 PROMPT_RAG = (
     "LIVE CONVERSATION TRANSCRIPT:\n{full_transcript}"
     "USER QUESTION: {question}"
