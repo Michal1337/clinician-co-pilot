@@ -1,26 +1,192 @@
-import copy
-import time
+import json
+import os
+import tempfile
+from pathlib import Path
 
 import librosa
 import streamlit as st
 
-from agent_demo import CHAT_TURN_AGENT, INITIAL_STATE, SUMMARY_AGENT
+from agent_demo import (
+    MAX_STEPS,
+    SUMMARY_AGENT,
+    chat_retrieve,
+    commit_chat_answer,
+    compute_alerts,
+    generate_soap_note,
+    image_vectorstore,
+    make_initial_state,
+    stream_chat_answer,
+    text_vectorstore,
+)
 from audio_agent import AUDIO_AGENT, CHUNK_SAMPLES, STEP_SAMPLES
+from demographics import (
+    allergy_badges,
+    load_patient_demographics,
+    primary_problem,
+)
+from utils import (
+    build_source_index,
+    collect_image_paths,
+    format_source_label,
+)
+
+ROSTER_PATH = Path("../data/vdbs/patients.json")
 
 
-def render_stage1(state, query_action_box, summary_box):
-    """Render current action/query and a patient summary, skipping empty sections.
-    Evidence is rendered inline as subscript next to each statement.
-    Handles both string and dict items safely.
-    """
+# ========================================================================
+# Cached resources / data
+# ========================================================================
 
-    # Show current action/query (UNCHANGED)
-    if state.get("action") != "finish":
-        query_action_box.markdown(
-            f"### 🔎 Current State\n**Action:** `{state.get('action')}`  \n"
-            f"**Query:** `{state.get('query')}`  \n"
-            f"**Allowed Years:** `{state.get('allowed_years')}`"
+@st.cache_data(show_spinner=False)
+def load_subject_ids():
+    if ROSTER_PATH.exists():
+        try:
+            with open(ROSTER_PATH, "r") as f:
+                return [int(s) for s in json.load(f)]
+        except Exception:
+            pass
+    ids = []
+    for p in sorted(Path("../data").glob("patient_*_history.json")):
+        try:
+            with open(p, "r") as f:
+                ids.append(int(json.load(f)["subject_id"]))
+        except Exception:
+            continue
+    return ids
+
+
+@st.cache_resource(show_spinner=False)
+def get_source_index():
+    return build_source_index(text_vectorstore, image_vectorstore)
+
+
+@st.cache_data(show_spinner=False)
+def load_audio(audio_path: str):
+    waveform, _ = librosa.load(audio_path, sr=16000)
+    return waveform
+
+
+@st.cache_data(show_spinner=False)
+def get_demographics(subject_id: int):
+    return load_patient_demographics(subject_id)
+
+
+_ACTION_LABELS = {
+    "search_text": "Searching clinical notes",
+    "search_imaging": "Searching imaging studies",
+    "finish": "Finalizing summary",
+}
+
+
+def _action_status_line(state) -> str:
+    """One-line caption describing what the planner is doing right now."""
+    action = state.get("action") or ""
+    step = int(state.get("step") or 0)
+    label = _ACTION_LABELS.get(action, action.replace("_", " ").title() if action else "")
+    if not label:
+        return ""
+    line = f"Step {min(step, MAX_STEPS)}/{MAX_STEPS} · {label}"
+    query = (state.get("query") or "").strip()
+    if query and action != "finish":
+        line += f" · _{query}_"
+    return line
+
+
+# ========================================================================
+# Rendering helpers
+# ========================================================================
+
+def render_patient_header(demographics: dict, summary: dict, container) -> None:
+    """Always-visible chart banner: name, age/sex, MRN, primary problem,
+    allergies. Mirrors the top strip of a real EHR — this is what a
+    clinician orients to before reading anything else."""
+    name = demographics.get("name") or "—"
+    age = demographics.get("age")
+    sex = demographics.get("sex")
+    mrn = demographics.get("mrn") or ""
+    age_sex = " · ".join(
+        [f"{age} y/o" if age is not None else "", sex or ""]
+    ).strip(" ·") or "Demographics pending"
+
+    problem = primary_problem(summary) or "No active problem captured yet"
+    badges = allergy_badges(summary)
+    if badges:
+        allergy_html = " ".join(
+            f"<span style='background:#fde2e2;color:#9b1c1c;border-radius:10px;"
+            f"padding:1px 8px;font-size:11px;margin-right:4px;white-space:nowrap;'>"
+            f"⚠ {b}</span>"
+            for b in badges
         )
+    else:
+        allergy_html = (
+            "<span style='color:#888;font-size:11px;'>NKDA / not documented</span>"
+        )
+
+    html = f"""
+    <div style="
+        background:#ffffff;
+        border:1px solid #e2e6eb;
+        border-left:4px solid #1f4e79;
+        border-radius:6px;
+        padding:8px 14px;
+        margin-bottom:10px;
+        display:flex;
+        gap:18px;
+        align-items:center;
+        flex-wrap:wrap;
+        font-size:13px;
+    ">
+      <div style="font-weight:600;font-size:16px;color:#1f2933;">{name}</div>
+      <div style="color:#52606d;">{age_sex}</div>
+      <div style="color:#52606d;font-family:monospace;font-size:12px;">{mrn}</div>
+      <div style="flex:1;min-width:180px;color:#1f2933;">
+        <span style="color:#7b8794;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">
+          Primary problem
+        </span><br>
+        {problem}
+      </div>
+      <div>
+        <span style="color:#7b8794;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">
+          Allergies
+        </span><br>
+        {allergy_html}
+      </div>
+    </div>
+    """
+    container.markdown(html, unsafe_allow_html=True)
+
+
+def render_imaging_evidence(state, container, max_images=4):
+    paths = collect_image_paths(state.get("retrieved_docs"), max_images=max_images)
+    if not paths:
+        container.empty()
+        return
+    with container.container():
+        st.markdown("#### 🩻 Retrieved imaging")
+        cols = st.columns(min(len(paths), max_images))
+        for col, path in zip(cols, paths):
+            try:
+                col.image(path, caption=os.path.basename(path), width="stretch")
+            except Exception as e:
+                col.warning(f"Could not load {path}: {e}")
+
+
+def render_stage1(
+    state,
+    query_action_box,
+    summary_box,
+    source_index=None,
+    max_steps: int = 5,
+    show_empty: bool = False,
+):
+    """Render planner state and the patient summary."""
+    action = state.get("action")
+    if action and action != "finish":
+        line = _action_status_line(state)
+        if line:
+            query_action_box.info(line)
+        else:
+            query_action_box.empty()
     else:
         query_action_box.empty()
 
@@ -55,43 +221,41 @@ def render_stage1(state, query_action_box, summary_box):
                 return True
         return False
 
-    # 🔹 NEW: Inline evidence formatter
     def format_evidence_inline(evs):
         formatted = []
         for ev in evs:
-            src = (ev.get("source_id") or "").strip()
-            date = (ev.get("date") or "").strip()
-            if not (src or date):
-                continue
-            if src and date:
-                formatted.append(f"`{src}` · {date}")
-            elif src:
-                formatted.append(f"`{src}`")
-            else:
-                formatted.append(f"{date}")
+            label = format_source_label(
+                ev.get("source_id"),
+                ev.get("date"),
+                source_index=source_index,
+            )
+            if label:
+                formatted.append(label)
         if not formatted:
             return ""
-        joined = " | ".join(formatted)
-        return f" <sub style='color:gray'>[{joined}]</sub>"
+        return f" <sub style='color:gray'>[{' | '.join(formatted)}]</sub>"
 
     md_lines = ["### 🧾 Patient Summary\n"]
     added_content = False
 
-    def render_section(title, items, keys, formatter=None):
+    def render_section(title, items, keys, formatter, empty_msg=None):
         nonlocal added_content
         filtered = [i for i in items if item_has_any_text(i, keys)]
-        if not filtered:
+        if not filtered and not (show_empty and empty_msg):
             return
-        added_content = True
+        if filtered:
+            added_content = True
         md_lines.append(f"#### {title}")
-        for i in filtered:
-            if isinstance(i, str):
-                md_lines.append(f"- {i}")
-            else:
-                md_lines.append(formatter(i))
+        if filtered:
+            for i in filtered:
+                if isinstance(i, str):
+                    md_lines.append(f"- {i}")
+                else:
+                    md_lines.append(formatter(i))
+        else:
+            md_lines.append(f"<span style='color:#7b8794'>_{empty_msg}_</span>")
         md_lines.append("")
 
-    # Active Problems
     def format_problem(p):
         prob = (p.get("problem") or "").strip() or "(unspecified problem)"
         status = (p.get("status") or "").strip()
@@ -103,9 +267,9 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "active_problems"),
         ["problem", "status"],
         format_problem,
+        empty_msg="No active problems documented in the available records.",
     )
 
-    # Recent Events
     def format_event(e):
         event_text = (e.get("event") or "").strip()
         date = (e.get("date") or "").strip()
@@ -117,9 +281,9 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "recent_events"),
         ["event"],
         format_event,
+        empty_msg="No recent events surfaced.",
     )
 
-    # Medications
     def format_med(m):
         name = (m.get("name") or "").strip()
         dose = (m.get("dose") or "").strip()
@@ -141,9 +305,9 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "medications"),
         ["name", "dose", "route"],
         format_med,
+        empty_msg="No medications documented — confirm with patient.",
     )
 
-    # Key Results
     def format_result(r):
         test = (r.get("test") or "").strip() or "(test)"
         result = (r.get("result") or "").strip()
@@ -160,9 +324,9 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "key_results"),
         ["test", "result"],
         format_result,
+        empty_msg="No notable lab or test results retrieved.",
     )
 
-    # Procedures
     def format_proc(p):
         proc = (p.get("procedure") or "").strip()
         date = (p.get("date") or "").strip()
@@ -174,9 +338,9 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "procedures"),
         ["procedure"],
         format_proc,
+        empty_msg="No prior procedures documented — does the patient recall any surgeries?",
     )
 
-    # Allergies
     def format_allergy(a):
         sub = (a.get("substance") or "").strip()
         reaction = (a.get("reaction") or "").strip()
@@ -195,9 +359,9 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "allergies"),
         ["substance", "reaction"],
         format_allergy,
+        empty_msg="NKDA / not documented — verify with patient.",
     )
 
-    # Pending Items
     def format_pending(p):
         item = (p.get("item") or "").strip()
         line = f"- {item}" if item else "- (unspecified)"
@@ -208,59 +372,25 @@ def render_stage1(state, query_action_box, summary_box):
         get_list(summary, "pending_items"),
         ["item"],
         format_pending,
+        empty_msg="No outstanding follow-up items flagged.",
     )
 
-    if not added_content:
+    if not added_content and not show_empty:
         summary_box.markdown(
             "### 🧾 Patient Summary\nNo populated sections in the summary yet."
         )
         return
 
-    # allow HTML for subscript styling
     summary_box.markdown("\n".join(md_lines), unsafe_allow_html=True)
 
 
-# ----------------- Audio streaming function -----------------
-def run_audio_agent(audio_path, placeholder):
-    """
-    Stream audio chunks and update live transcript and conversation summary.
-    Uses render_live_transcription() for consistent display.
-    """
-    time.sleep(10)
-    # Load audio waveform
-    waveform, sr = librosa.load(audio_path, sr=16000)
-    total_samples = len(waveform)
-
-    # Stream audio in steps
-    for start in range(0, total_samples, STEP_SAMPLES):
-        chunk = waveform[start : start + CHUNK_SAMPLES]
-        st.session_state.state["audio_chunk"] = chunk
-
-        # Stream through AUDIO_AGENT
-        for event in AUDIO_AGENT.stream(st.session_state.state):
-            for _, node_output in event.items():
-                # Update session state
-                st.session_state.state.update(node_output)
-
-                # Render transcript + conversation summary in placeholder
-                render_live_transcription(st.session_state.state, placeholder)
-
-
 def render_live_transcription(state, placeholder):
-    """
-    Render live transcript and conversation summary together.
-    Adds titles similar to render_stage1.
-    """
-    md_lines = []
-
-    # Add transcript title and content
-    md_lines.append("### 🎤 Live Transcript\n")
-    transcript = state.get("full_transcript", "").strip()
+    md_lines = ["### 🎤 Live Transcript\n"]
+    transcript = (state.get("full_transcript") or "").strip()
     md_lines.append(transcript if transcript else "_No transcript yet._")
 
-    # Add conversation summary title and content
     md_lines.append("\n### 🧾 Conversation Summary\n")
-    conversation_summary = state.get("conversation_summary", {})
+    conversation_summary = state.get("conversation_summary", {}) or {}
     added_content = False
     for key, value in conversation_summary.items():
         if isinstance(value, list) and value:
@@ -271,15 +401,65 @@ def render_live_transcription(state, placeholder):
         elif isinstance(value, str) and value.strip():
             md_lines.append(f"- **{key.replace('_', ' ').title()}:** {value}")
             added_content = True
-
     if not added_content:
         md_lines.append("_No conversation summary yet._")
 
-    # Render everything in the placeholder
-    placeholder.markdown("\n".join(md_lines), unsafe_allow_html=True)
+    placeholder.markdown("\n".join(md_lines))
 
 
-# ----------------- Page config & styling -----------------
+def render_alerts(alerts, container):
+    if not alerts:
+        container.info("No clinical alerts to surface yet.")
+        return
+    with container.container():
+        st.markdown("#### 🚨 Clinical alerts")
+        for a in alerts:
+            title = a.get("title") or "(alert)"
+            rationale = a.get("rationale") or ""
+            action = a.get("suggested_action") or ""
+            block = f"**{title}**"
+            if rationale:
+                block += f"  \n{rationale}"
+            if action:
+                block += f"  \n_Suggested:_ {action}"
+            st.warning(block)
+
+
+def run_audio_agent(audio_path, transcript_placeholder, progress_placeholder=None):
+    """Stream audio chunks through the transcription/summarization graph."""
+    waveform = load_audio(audio_path)
+    total_samples = len(waveform)
+    progress_bar = (
+        progress_placeholder.progress(0.0, text="Streaming audio…")
+        if progress_placeholder is not None
+        else None
+    )
+
+    for start in range(0, total_samples, STEP_SAMPLES):
+        chunk = waveform[start : start + CHUNK_SAMPLES]
+        st.session_state.state["audio_chunk"] = chunk
+
+        for event in AUDIO_AGENT.stream(st.session_state.state):
+            for _, node_output in event.items():
+                st.session_state.state.update(node_output)
+                render_live_transcription(
+                    st.session_state.state, transcript_placeholder
+                )
+
+        if progress_bar is not None:
+            done = min(1.0, (start + CHUNK_SAMPLES) / max(total_samples, 1))
+            progress_bar.progress(
+                done, text=f"Streaming audio… {int(done * 100)}%"
+            )
+
+    if progress_bar is not None and progress_placeholder is not None:
+        progress_placeholder.empty()
+
+
+# ========================================================================
+# Page setup + session state
+# ========================================================================
+
 st.set_page_config(layout="wide")
 st.markdown(
     """
@@ -298,168 +478,314 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🩺 Clinician Co-Pilot: AI Support Across the Patient Visit")
+st.title("🩺 Clinician Co-Pilot")
 
-# ----------------- Session state -----------------
-if "state" not in st.session_state:
-    st.session_state.state = copy.deepcopy(INITIAL_STATE)
-if "stage1_done" not in st.session_state:
-    st.session_state.stage1_done = False
-if "generating_summary" not in st.session_state:
-    st.session_state.generating_summary = False
-if "show_summary" not in st.session_state:
-    st.session_state.show_summary = True  # default to show summary after stage1
-if "live_transcription_started" not in st.session_state:
-    st.session_state.live_transcription_started = False
-if "qa_history" not in st.session_state:
-    st.session_state.qa_history = []
+subject_ids = load_subject_ids()
+if not subject_ids:
+    st.error(
+        "No patients available. Build the vector stores first: "
+        "`python make_vdbs.py` from the `src/` directory."
+    )
+    st.stop()
+
+with st.sidebar:
+    st.header("Patient")
+    selected = st.selectbox(
+        "Subject ID",
+        options=subject_ids,
+        index=0,
+        key="selected_subject_id",
+        help="Choose the patient whose record this session should reason over.",
+    )
+    if st.button("Reset session", help="Clear summary, chat, and live transcription"):
+        # Clean up uploaded image temp files before throwing away state.
+        for qa in st.session_state.get("qa_history", []) or []:
+            p = qa.get("user_image_path")
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        st.session_state.pop("state", None)
+        st.session_state.pop("active_subject_id", None)
+        st.rerun()
 
 
-# ----------------- Main UI -----------------
+def _ensure_state_for(subject_id: int):
+    if (
+        "state" not in st.session_state
+        or st.session_state.get("active_subject_id") != subject_id
+    ):
+        st.session_state.state = make_initial_state(subject_id)
+        st.session_state.active_subject_id = subject_id
+        st.session_state.stage1_done = False
+        st.session_state.live_transcription_started = False
+        st.session_state.qa_history = []
+        st.session_state.alerts = []
+        st.session_state.soap_note = None
+
+
+_ensure_state_for(int(selected))
+
+st.session_state.setdefault("stage1_done", False)
+st.session_state.setdefault("live_transcription_started", False)
+st.session_state.setdefault("qa_history", [])
+st.session_state.setdefault("alerts", [])
+st.session_state.setdefault("soap_note", None)
+
+source_index = get_source_index()
+
+
+def _save_uploaded_image(uploaded_file) -> str:
+    suffix = os.path.splitext(uploaded_file.name)[1] or ".png"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(uploaded_file.getvalue())
+        tmp.flush()
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+# ========================================================================
+# Main UI
+# ========================================================================
+
 def main_ui():
+    # Always-visible chart banner across the full page width. The header
+    # placeholder is also re-rendered inside the summary streaming loop so
+    # the primary-problem field fills in live as the agent works.
+    demographics = get_demographics(int(st.session_state.active_subject_id))
+    header_box = st.empty()
+    render_patient_header(
+        demographics, st.session_state.state.get("summary"), header_box
+    )
+
     col_left, col_right = st.columns([6, 4])
 
-    # ----------------- LEFT COLUMN -----------------
     with col_left:
-        st.header("🩺 Patient Summary Generation / 🎙️ Live Transcription")
-
-        # ----------------- View toggle -----------------
-        view_mode = st.radio(
-            "View",
-            options=["Patient Summary Generation", "Live Transcription"],
-            index=0,  # Default to Summary
-            key="view_mode_radio",
-            help="Choose to view the generated patient summary or the live transcription",
+        tab_summary, tab_visit = st.tabs(
+            ["🩺 Patient Summary", "🎙️ Live Visit"]
         )
-        st.session_state.show_summary = view_mode == "Patient Summary Generation"
 
-        # ----------------- Placeholders -----------------
-        query_action_box = st.empty()
-        summary_box = st.empty()
-        live_placeholder = st.empty()
+        with tab_summary:
+            query_action_box = st.empty()
+            summary_box = st.empty()
+            imaging_box = st.empty()
 
-        # ----------------- Summary view -----------------
-        if st.session_state.show_summary:
-            # Show Generate button only if summary not done
             if not st.session_state.stage1_done:
                 if st.button("Generate Summary", key="generate_summary_btn"):
-                    st.session_state.generating_summary = True
-                    with st.spinner("Generating Patient Summary..."):
+                    with st.spinner("Generating patient summary…"):
                         for event in SUMMARY_AGENT.stream(st.session_state.state):
-                            for node_name, node_output in event.items():
+                            for _, node_output in event.items():
                                 st.session_state.state.update(node_output)
-                                # Render summary only after generation begins
                                 render_stage1(
                                     st.session_state.state,
                                     query_action_box,
                                     summary_box,
+                                    source_index=source_index,
+                                    max_steps=MAX_STEPS,
+                                )
+                                render_imaging_evidence(
+                                    st.session_state.state, imaging_box
+                                )
+                                # Refresh the banner so the primary-problem
+                                # and allergy badges populate live.
+                                render_patient_header(
+                                    demographics,
+                                    st.session_state.state.get("summary"),
+                                    header_box,
                                 )
 
                     st.session_state.stage1_done = True
-                    st.session_state.generating_summary = False
-                    st.session_state.show_summary = True
+                    st.rerun()
+            else:
+                render_stage1(
+                    st.session_state.state,
+                    query_action_box,
+                    summary_box,
+                    source_index=source_index,
+                    max_steps=MAX_STEPS,
+                    show_empty=True,
+                )
+                render_imaging_evidence(st.session_state.state, imaging_box)
 
-            # Render summary if already generated
-            elif st.session_state.stage1_done:
-                render_stage1(st.session_state.state, query_action_box, summary_box)
+        with tab_visit:
+            live_placeholder = st.empty()
+            alerts_box = st.empty()
+            soap_box = st.empty()
 
-            # Clear live transcription placeholder when in Summary
-            live_placeholder.empty()
-
-        # ----------------- Live Transcription view -----------------
-        else:
-            # Clear summary placeholders when in Live Transcription
-            query_action_box.empty()
-            summary_box.empty()
-
-            # Render live transcription and conversation summary
-            if st.session_state.live_transcription_started:
+            if not st.session_state.live_transcription_started:
+                if st.button("Start Recording", key="start_record_btn"):
+                    st.session_state.live_transcription_started = True
+                    progress_placeholder = st.empty()
+                    with st.spinner("Recording / streaming audio…"):
+                        run_audio_agent(
+                            "../data/conv.wav",
+                            live_placeholder,
+                            progress_placeholder=progress_placeholder,
+                        )
+                    st.success("✅ Processing complete.")
+                    # Re-run so the alerts/SOAP controls below pick up the
+                    # transcribed state immediately rather than after the
+                    # next user interaction.
+                    st.rerun()
+            else:
                 render_live_transcription(st.session_state.state, live_placeholder)
 
-            # Start Recording button
-            if st.button("Start Recording", key="start_record_btn"):
-                st.session_state.live_transcription_started = True
-                with st.spinner("Recording / streaming audio..."):
-                    run_audio_agent("../data/conv.wav", live_placeholder)
-                st.success("✅ Processing complete.")
+                ctrl_cols = st.columns(2)
+                with ctrl_cols[0]:
+                    if st.button(
+                        "Refresh alerts",
+                        key="refresh_alerts_btn",
+                        help="Run a single LLM pass to surface clinically significant "
+                        "connections between the live conversation and the patient's "
+                        "history.",
+                    ):
+                        with st.spinner("Scanning for clinical alerts…"):
+                            st.session_state.alerts = compute_alerts(
+                                st.session_state.state
+                            )
+                with ctrl_cols[1]:
+                    if st.button(
+                        "Generate SOAP note",
+                        key="soap_btn",
+                        help="Draft a SOAP note from the captured visit.",
+                    ):
+                        with st.spinner("Drafting SOAP note…"):
+                            st.session_state.soap_note = generate_soap_note(
+                                st.session_state.state
+                            )
 
-    # ----------------- RIGHT COLUMN -----------------
+                render_alerts(st.session_state.alerts, alerts_box)
+                if st.session_state.soap_note:
+                    with soap_box.container():
+                        st.markdown("#### 📝 SOAP note draft")
+                        st.markdown(st.session_state.soap_note)
+
     with col_right:
         st.header("💬 Clinical Chat")
         chat_placeholder = st.container()
 
-        # Chat input form
         with st.form("chat_form", clear_on_submit=True):
             user_question = st.text_input("Ask about this patient")
-            submitted = st.form_submit_button("Send", use_container_width=False)
+            uploaded_image = st.file_uploader(
+                "Attach an image (optional)",
+                type=["png", "jpg", "jpeg"],
+                help="Drop a fresh X-ray or photo to ask about it directly.",
+            )
+            submitted = st.form_submit_button("Send")
 
-        # Handle submission
-        if submitted and user_question.strip():
-            if not st.session_state.stage1_done:
+        if submitted and user_question.strip() and st.session_state.stage1_done:
+            handle_chat_submission(user_question, uploaded_image, chat_placeholder)
+        else:
+            if submitted and not st.session_state.stage1_done:
                 st.warning("Please generate the patient summary first (left column).")
-            else:
-                with st.spinner("Thinking..."):
-                    st.session_state.state.update({"question": user_question})
-                    st.session_state.state = CHAT_TURN_AGENT.invoke(
-                        st.session_state.state
-                    )
-
-                    # Extract assistant answer
-                    chat_history = st.session_state.state.get("chat_history", [])
-                    assistant_answer = ""
-                    if chat_history:
-                        last_msg = chat_history[-1]
-                        if last_msg.get("role") == "assistant":
-                            assistant_answer = last_msg.get("content", [{"text": ""}])[
-                                0
-                            ].get("text", "")
-
-                    st.session_state.qa_history.append(
-                        {"question": user_question, "answer": assistant_answer}
-                    )
-
-        # Render chat history above input
-        with chat_placeholder:
-            if not st.session_state.qa_history:
-                st.info(
-                    "No chat history yet. Generate the patient summary and ask a question."
-                )
-
-            for qa in st.session_state.qa_history:
-                # User bubble
-                st.markdown(
-                    f"""
-                    <div style="
-                        background-color:#1f77ff20;
-                        padding:12px;
-                        border-radius:12px;
-                        margin-bottom:8px;
-                        border:1px solid #1f77ff40;
-                    ">
-                        <b>You:</b><br>
-                        {qa['question']}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                # Assistant bubble
-                st.markdown(
-                    f"""
-                    <div style="
-                        background-color:#2e2e2e20;
-                        padding:12px;
-                        border-radius:12px;
-                        margin-bottom:16px;
-                        border:1px solid #99999930;
-                    ">
-                        <b>Agent:</b><br>
-                        {qa['answer']}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            render_chat_history(chat_placeholder)
 
 
-# ----------------- Run UI -----------------
+def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder):
+    uploaded_path = _save_uploaded_image(uploaded_image) if uploaded_image else None
+    st.session_state.state.update(
+        {"question": user_question, "uploaded_image_path": uploaded_path}
+    )
+
+    # Pre-render the new question + a streaming placeholder so the user
+    # sees their message instantly and watches the answer build up.
+    with chat_placeholder:
+        for qa in st.session_state.qa_history:
+            _render_chat_pair(qa)
+        with st.chat_message("user"):
+            st.markdown(user_question)
+            if uploaded_path and os.path.exists(uploaded_path):
+                st.image(uploaded_path, caption="Your attachment", width=320)
+        assistant_msg = st.chat_message("assistant")
+        answer_placeholder = assistant_msg.empty()
+        answer_placeholder.markdown("_Retrieving evidence…_")
+
+    with st.spinner("Retrieving evidence…"):
+        st.session_state.state = chat_retrieve(st.session_state.state)
+
+    answer_text = ""
+    with st.spinner("Answering…"):
+        for delta in stream_chat_answer(st.session_state.state):
+            answer_text += delta
+            answer_placeholder.markdown(answer_text or "_…_")
+
+    st.session_state.state.update(
+        commit_chat_answer(st.session_state.state, answer_text)
+    )
+
+    used_paths = collect_image_paths(
+        st.session_state.state.get("retrieved_docs", [])[-1:],
+        max_images=3,
+    )
+    if uploaded_path:
+        used_paths = [uploaded_path] + [p for p in used_paths if p != uploaded_path]
+
+    qa = {
+        "question": user_question,
+        "answer": answer_text,
+        "user_image_path": uploaded_path,
+        "evidence_image_paths": used_paths,
+    }
+    st.session_state.qa_history.append(qa)
+
+    # We already drew the question + assistant message inline. The only
+    # missing piece is the "imaging the agent referenced" expander; add it
+    # now under the streamed answer so this render matches future ones.
+    evidence_paths = [
+        p
+        for p in used_paths
+        if p and p != uploaded_path and os.path.exists(p)
+    ]
+    if evidence_paths:
+        with assistant_msg:
+            with st.expander("🩻 Imaging the agent referenced", expanded=False):
+                cols = st.columns(min(len(evidence_paths), 3))
+                for col, p in zip(cols, evidence_paths):
+                    try:
+                        col.image(p, caption=os.path.basename(p), width="stretch")
+                    except Exception as e:
+                        col.warning(f"Could not load {p}: {e}")
+
+
+def _render_chat_pair(qa: dict):
+    """Render one (question, answer) pair using Streamlit's native chat
+    components. Using markdown + chat_message also escapes the user's
+    text so a `<script>` tag in the question can't run."""
+    with st.chat_message("user"):
+        st.markdown(qa["question"])
+        path = qa.get("user_image_path")
+        if path and os.path.exists(path):
+            st.image(path, caption="Your attachment", width=320)
+
+    with st.chat_message("assistant"):
+        st.markdown(qa.get("answer") or "_(no answer)_")
+        evidence_paths = [
+            p
+            for p in qa.get("evidence_image_paths", []) or []
+            if p and p != qa.get("user_image_path") and os.path.exists(p)
+        ]
+        if evidence_paths:
+            with st.expander("🩻 Imaging the agent referenced", expanded=False):
+                cols = st.columns(min(len(evidence_paths), 3))
+                for col, p in zip(cols, evidence_paths):
+                    try:
+                        col.image(p, caption=os.path.basename(p), width="stretch")
+                    except Exception as e:
+                        col.warning(f"Could not load {p}: {e}")
+
+
+def render_chat_history(chat_placeholder):
+    with chat_placeholder:
+        if not st.session_state.qa_history:
+            st.info(
+                "No chat history yet. Generate the patient summary and ask a question."
+            )
+            return
+        for qa in st.session_state.qa_history:
+            _render_chat_pair(qa)
+
+
 main_ui()

@@ -1,18 +1,69 @@
-import os
+import json
 import math
+import os
 import re
 from datetime import datetime
-from typing import Any, Dict
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from json_repair import repair_json
 
 
-def extract_response_json(text):
-    text = text.replace("null", "None")
+# Gemma 4 emits its (possibly empty) "thought" channel before the final answer:
+#   <|channel>thought\n[reasoning]<channel|>[final answer]
+# When thinking is disabled the thought block is empty but the separator is still
+# present. We split on `<channel|>` and keep the final answer.
+GEMMA4_THINK_SEP = "<channel|>"
+LEGACY_THINK_SEP = "<unused95>"
+
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+def _assistant_content(response_or_text: Any) -> str:
+    if isinstance(response_or_text, str):
+        return response_or_text
+    if isinstance(response_or_text, list):
+        try:
+            content = response_or_text[0]["generated_text"][-1]["content"]
+        except (KeyError, IndexError, TypeError):
+            return str(response_or_text)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    return part.get("text", "")
+        return str(content)
+    return str(response_or_text)
+
+
+def extract_assistant_text(response_or_text: Any) -> str:
+    text = _assistant_content(response_or_text)
+    for sep in (GEMMA4_THINK_SEP, LEGACY_THINK_SEP):
+        if sep in text:
+            text = text.rsplit(sep, 1)[-1]
+            break
+    return text.strip()
+
+
+def parse_response_json(response_or_text: Any) -> Any:
+    text = extract_assistant_text(response_or_text)
+    text = _CODE_FENCE_RE.sub("", text).strip()
+    if not text:
+        return {}
     try:
-        clean = re.sub(r"^```json\s*|\s*```$", "", text.split("<unused95>")[1].strip())
-    except:
-        clean = re.sub(r"^```json\s*|\s*```$", "", text.strip())
+        return json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(repair_json(text))
+        except Exception:
+            return {}
 
-    return clean
+
+def extract_response_json(text: Any) -> str:
+    cleaned = extract_assistant_text(text)
+    return _CODE_FENCE_RE.sub("", cleaned).strip()
 
 
 item2str = {
@@ -60,39 +111,148 @@ def imagedoc2str(doc):
     return res
 
 
+# --- Image-path resolution -----------------------------------------------
+
+@lru_cache(maxsize=4096)
+def _resolve_path_cached(candidate: str) -> Optional[str]:
+    if not candidate:
+        return None
+    if os.path.isabs(candidate):
+        return candidate if os.path.exists(candidate) else None
+    project_root = Path(__file__).resolve().parent.parent
+    for root in (Path.cwd(), project_root, project_root / "data"):
+        p = (root / candidate).resolve()
+        if p.exists():
+            return str(p)
+    return None
+
+
+def resolve_image_path(doc) -> Optional[str]:
+    """Return an existing on-disk path for a doc that represents an image, or
+    None if no image can be found."""
+    candidates: List[str] = []
+    page = getattr(doc, "page_content", None)
+    if isinstance(page, str) and page:
+        candidates.append(page)
+    meta = getattr(doc, "metadata", None) or {}
+    for key in ("image_path", "main_image_path", "path", "file_path"):
+        v = meta.get(key)
+        if isinstance(v, str) and v:
+            candidates.append(v)
+    for cand in candidates:
+        resolved = _resolve_path_cached(cand)
+        if resolved:
+            return resolved
+    return None
+
+
+def collect_image_paths(retrieved_docs_batches, max_images: int = 6) -> List[str]:
+    """Walk a list of retrieval batches (list of lists of Documents) and
+    return a deduplicated list of on-disk image paths, preserving order."""
+    seen = set()
+    out: List[str] = []
+    for batch in retrieved_docs_batches or []:
+        for doc in batch or []:
+            path = resolve_image_path(doc)
+            if path and path not in seen:
+                seen.add(path)
+                out.append(path)
+                if len(out) >= max_images:
+                    return out
+    return out
+
+
+# --- Source-id index for friendly evidence rendering ---------------------
+
+def _normalize_section(section: Optional[str]) -> str:
+    if not section:
+        return "Source"
+    label = section.replace("_", " ").strip().title()
+    overrides = {
+        "Discharge Summary": "Discharge note",
+        "Lab Summary": "Labs",
+        "Diagnoses": "Diagnoses",
+        "Procedures": "Procedures",
+        "Medications": "Medications",
+    }
+    return overrides.get(label, label)
+
+
+def build_source_index(*vectorstores) -> Dict[str, Dict[str, Any]]:
+    """Walk one or more FAISS vector stores and produce a mapping from
+    source identifiers (document_id / dicom_id / study_id) to a friendly
+    descriptor. Used by the UI to render evidence as e.g.
+    "Discharge note · 2024-03-01" instead of a raw UUID."""
+    idx: Dict[str, Dict[str, Any]] = {}
+    for vs in vectorstores:
+        store = getattr(vs, "docstore", None)
+        if store is None:
+            continue
+        # FAISS LangChain stores expose internal dict via _dict
+        items = getattr(store, "_dict", None) or {}
+        for doc in items.values():
+            m = getattr(doc, "metadata", {}) or {}
+            section = _normalize_section(m.get("section"))
+            date = m.get("admittime") or m.get("dischtime") or m.get("study_date")
+            entry = {
+                "section": section if m.get("section") else None,
+                "date": date,
+                "hadm_id": m.get("hadm_id"),
+                "subject_id": m.get("subject_id"),
+            }
+            for key in ("document_id", "dicom_id", "study_id"):
+                src = m.get(key)
+                if src:
+                    if key in ("dicom_id", "study_id") and not entry["section"]:
+                        entry = dict(entry, section="Chest X-ray")
+                    idx[str(src)] = entry
+    return idx
+
+
+def format_source_label(
+    source_id: Optional[str],
+    fallback_date: Optional[str],
+    source_index: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> str:
+    """Render a single evidence reference as a short human-readable label.
+    Falls back to the raw id + date when nothing is known about the source."""
+    src = (source_id or "").strip()
+    date = (fallback_date or "").strip()
+    info = source_index.get(src) if (source_index and src) else None
+    if info:
+        section = info.get("section") or "Source"
+        d = (date or info.get("date") or "")[:10]
+        return f"{section}" + (f" · {d}" if d else "")
+    if src and date:
+        return f"`{src[:8]}…` · {date[:10]}"
+    if src:
+        return f"`{src[:8]}…`"
+    return date[:10] if date else ""
+
+
+# --- Multimodal user content --------------------------------------------
+
 def add_images_to_user_content(content, retrieved_docs, max_images=3):
-    """
-    Add image entries to user message content for multimodal models.
-    Images are inserted before text blocks as recommended by Gemma 4 docs.
-    """
+    """Add image entries to user message content for multimodal models.
+    Images are inserted before text blocks as recommended by Gemma 4 docs."""
     if not isinstance(content, list):
         return content
 
     image_entries = []
     seen_paths = set()
 
-    for doc in (retrieved_docs or []):
-        path = None
-        if isinstance(getattr(doc, "page_content", None), str) and os.path.exists(
-            doc.page_content
-        ):
-            path = doc.page_content
-        elif hasattr(doc, "metadata") and isinstance(doc.metadata, dict):
-            for key in ["image_path", "main_image_path", "path", "file_path"]:
-                maybe_path = doc.metadata.get(key)
-                if isinstance(maybe_path, str) and os.path.exists(maybe_path):
-                    path = maybe_path
-                    break
-
+    for doc in retrieved_docs or []:
+        path = resolve_image_path(doc)
         if path and path not in seen_paths:
             image_entries.append({"type": "image", "url": path})
             seen_paths.add(path)
-
         if len(image_entries) >= max_images:
             break
 
     return image_entries + content if image_entries else content
 
+
+# --- Time decay ----------------------------------------------------------
 
 def windowed_time_decay(
     doc_date_str, allowed_years, lambda_inside=0.005, lambda_outside=0.03
@@ -107,12 +267,12 @@ def windowed_time_decay(
         return math.exp(-lambda_outside * age_days)
 
 
+# --- JSON patch ----------------------------------------------------------
+
 def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     def is_empty_item(item: dict) -> bool:
-        """Check if all values in the dict are empty or lists of empty dicts."""
         for v in item.values():
             if isinstance(v, list):
-                # if list has at least one non-empty dict, keep it
                 if any(not is_empty_item(x) for x in v if isinstance(x, dict)):
                     return False
             elif v not in ("", None):
@@ -125,12 +285,10 @@ def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, An
         if not isinstance(new_items, list):
             continue
 
-        # Remove any empty template entries first
         original[section] = [
             item for item in original[section] if not is_empty_item(item)
         ]
 
-        # Append non-empty items, preventing duplicates
         for item in new_items:
             if not isinstance(item, dict) or is_empty_item(item):
                 continue
@@ -138,3 +296,64 @@ def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, An
                 original[section].append(item)
 
     return original
+
+
+# --- Planner guardrails --------------------------------------------------
+
+_HISTORICAL_QUERY_HINTS = (
+    "initial diagnos",
+    "first diagnos",
+    "past surgical",
+    "history of surger",
+    "lifetime",
+    "genetic",
+    "anchor age",
+    "birth",
+    "childhood",
+)
+
+# Reasonable fallback windows when the planner forgets to provide one,
+# keyed by substrings in the query text.
+_DEFAULT_WINDOW_BY_HINT = (
+    ("medication", 2),
+    ("med list", 2),
+    ("lab", 1),
+    ("vital", 1),
+    ("hba1c", 1),
+    ("imaging", 5),
+    ("x-ray", 5),
+    ("xray", 5),
+    ("echo", 3),
+    ("procedure", 5),
+    ("admission", 3),
+    ("hospital", 3),
+)
+
+
+def looks_historical(query: str) -> bool:
+    q = (query or "").lower()
+    return any(h in q for h in _HISTORICAL_QUERY_HINTS)
+
+
+def default_allowed_years(query: str) -> int:
+    q = (query or "").lower()
+    for hint, years in _DEFAULT_WINDOW_BY_HINT:
+        if hint in q:
+            return years
+    return 3
+
+
+def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply guardrails to a planner JSON output: ensure `allowed_years` is
+    set for non-historical search queries, and clamp invalid actions."""
+    if not isinstance(plan, dict):
+        return {"action": "finish", "query": None}
+    action = plan.get("action")
+    if action not in ("search_text", "search_imaging", "finish"):
+        return {"action": "finish", "query": None}
+    if action in ("search_text", "search_imaging"):
+        query = plan.get("query") or ""
+        years = plan.get("allowed_years")
+        if (years is None or years == 0) and not looks_historical(query):
+            plan["allowed_years"] = default_allowed_years(query)
+    return plan
