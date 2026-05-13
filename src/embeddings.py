@@ -1,3 +1,4 @@
+import os
 from typing import List
 
 import numpy as np
@@ -5,6 +6,10 @@ import torch
 from langchain.embeddings.base import Embeddings
 from PIL import Image
 from transformers import AutoModel, AutoProcessor, AutoTokenizer
+
+# Both embedders are small; co-locate them on the non-LLM GPU by default
+# (cuda:1) so cuda:0 is free for Gemma. Override via env var if needed.
+EMBED_DEVICE = os.environ.get("CLINICIAN_EMBED_DEVICE", "cuda:1")
 
 
 class MedSigLIPEmbeddings(Embeddings):
@@ -94,5 +99,5 @@ class ClinicalBERTEmbeddings(Embeddings):
         return self._embed([text])[0]
 
 
-TEXT_EMBEDDINGS = ClinicalBERTEmbeddings(device="cuda:2")
-IMAGE_EMBEDDINGS = MedSigLIPEmbeddings(device="cuda:2")
+TEXT_EMBEDDINGS = ClinicalBERTEmbeddings(device=EMBED_DEVICE)
+IMAGE_EMBEDDINGS = MedSigLIPEmbeddings(device=EMBED_DEVICE)

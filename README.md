@@ -17,12 +17,12 @@ A local AI agent that summarizes patient records, imaging, and live visits to sa
 The app's sidebar exposes a **Subject ID** selector populated from whichever patients were extracted in step 3 — switching it resets the session for the new patient.
 
 ## Models
-- **`google/gemma-4-26B-A4B-it`** — multimodal (text + imaging) reasoning, planning, summarization, and chat. Run locally on a GPU (`CLINICIAN_LLM_DEVICE`, default `cuda:2`).
+- **`google/gemma-4-26B-A4B-it`** — multimodal (text + imaging) reasoning, planning, summarization, and chat. Run locally on a GPU (`CLINICIAN_LLM_DEVICE`, default `cuda:0`).
 - **`google/medsiglip-448`** — image-text embeddings for the chest-X-ray vector store, enabling natural-language search over imaging.
-- **`google/medasr`** — speech-to-text for live visit transcription (`CLINICIAN_ASR_DEVICE`, default `cuda:3`).
+- **`google/medasr`** — speech-to-text for live visit transcription (`CLINICIAN_ASR_DEVICE`, default `cuda:1`).
 - **`emilyalsentzer/Bio_ClinicalBERT`** — text embeddings for the clinical-notes vector store.
 
-All models are deployed locally so sensitive patient data never leaves the hospital environment.
+Default 2-GPU layout: Gemma 4 alone on `cuda:0`; ASR + both embedders share `cuda:1` (`CLINICIAN_EMBED_DEVICE`, default `cuda:1`). All models are deployed locally so sensitive patient data never leaves the hospital environment.
 
 ## Problem statement
 Physicians today face a significant administrative burden that limits time spent with patients. For every hour of direct clinical face time, **nearly two additional hours are spent on EHR and desk work** during the clinic day. Outside office hours, physicians spend another 1–2 hours on personal time completing computer and clerical tasks (Sinsky et al., 2016). This imbalance reduces time available for patient interaction, increases cognitive load, and contributes to clinician burnout.
