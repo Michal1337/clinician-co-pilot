@@ -1,12 +1,10 @@
 import warnings
 from copy import deepcopy
-from threading import Thread
 from typing import Any, Dict, Iterator, List, Literal, Optional, TypedDict
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langgraph.graph import END, START, StateGraph
-from transformers import TextIteratorStreamer
 
 from audio_agent import *  # noqa: F401,F403  (re-exports CHUNK_SAMPLES, STEP_SAMPLES, AUDIO_AGENT)
 from embeddings import IMAGE_EMBEDDINGS, TEXT_EMBEDDINGS
@@ -297,41 +295,14 @@ def chat_retrieve(state: AgentState) -> AgentState:
     return state
 
 
-def _stream_via_text_iterator(messages, max_new_tokens):
-    """Real token streaming via `TextIteratorStreamer`. Raises if the
-    pipeline doesn't expose a usable processor; the caller falls back to a
-    blocking generation in that case."""
-    processor = getattr(PIPE, "processor", None)
-    apply_chat_template = getattr(processor, "apply_chat_template", None)
-    tokenizer = (
-        getattr(processor, "tokenizer", None) if processor else None
-    ) or getattr(PIPE, "tokenizer", None)
-    if apply_chat_template is None or tokenizer is None:
-        raise RuntimeError("pipeline processor cannot stream")
-
-    inputs = apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-    ).to(PIPE.model.device)
-
-    streamer = TextIteratorStreamer(
-        tokenizer, skip_prompt=True, skip_special_tokens=False
-    )
-    gen_kwargs = dict(
-        **inputs,
-        streamer=streamer,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-    )
-    thread = Thread(target=PIPE.model.generate, kwargs=gen_kwargs)
-    thread.start()
-
+def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
+    """Yield deltas from an upstream stream, hiding Gemma 4's optional
+    `<channel|>thought<channel|>` prefix from the user-visible output.
+    If no separator shows up after ~4000 buffered chars, give up and flush
+    — the model is just answering directly."""
     pending = ""
     in_thought = True
-    for chunk in streamer:
+    for chunk in source:
         if in_thought:
             pending += chunk
             if GEMMA4_THINK_SEP in pending:
@@ -341,7 +312,6 @@ def _stream_via_text_iterator(messages, max_new_tokens):
                 if after:
                     yield after
             elif len(pending) > 4000:
-                # No thinking channel coming — flush and switch modes.
                 in_thought = False
                 yield pending
                 pending = ""
@@ -349,18 +319,19 @@ def _stream_via_text_iterator(messages, max_new_tokens):
             yield chunk
     if in_thought and pending:
         yield pending
-    thread.join()
 
 
 def stream_chat_answer(
     state: AgentState, max_new_tokens: int = 2000
 ) -> Iterator[str]:
     """Yield text deltas for the assistant's reply, hiding Gemma 4's
-    thinking channel from the user-visible stream. Falls back to a single
-    blocking generation if real streaming isn't available."""
+    optional thinking channel from the user-visible stream. Falls back to
+    a single blocking generation if vLLM streaming isn't available."""
     messages = _build_answer_messages(state)
     try:
-        yield from _stream_via_text_iterator(messages, max_new_tokens)
+        yield from _strip_thinking_channel(
+            PIPE.stream(messages, max_new_tokens=max_new_tokens)
+        )
     except Exception:
         response = PIPE(messages, do_sample=False, max_new_tokens=max_new_tokens)
         yield extract_assistant_text(response)

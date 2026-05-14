@@ -18,3 +18,4 @@ faiss-cpu>=1.8
 
 datasets>=2.18
 json-repair>=0.25
+openai>=1.40

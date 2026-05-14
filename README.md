@@ -12,17 +12,43 @@ A local AI agent that summarizes patient records, imaging, and live visits to sa
    # or: python get_data.py --subjects-file my_subjects.txt
    ```
 4. Build the vector databases over every extracted patient: `cd ../src && python make_vdbs.py`
-5. Run the Streamlit app: `streamlit run app.py --client.toolbarMode minimal`
+5. Start the **vLLM** server for Gemma 4 in a separate shell (see [vLLM serve](#vllm-serve) below).
+6. Run the Streamlit app: `streamlit run app.py`
 
 The app's sidebar exposes a **Subject ID** selector populated from whichever patients were extracted in step 3 — switching it resets the session for the new patient.
 
+### vLLM serve
+
+The LLM runs behind a vLLM OpenAI-compatible server for throughput; the app talks to it as if it were OpenAI. Start it in its own terminal, pointing at the pre-downloaded weights under `$CLINICIAN_MODELS_DIR` and telling vLLM to keep serving them under the canonical HuggingFace id so the client and server agree on the model name:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 vllm serve "$CLINICIAN_MODELS_DIR/gemma-4-26B-A4B-it" \
+    --served-model-name google/gemma-4-26B-A4B-it \
+    --port 8000 \
+    --max-model-len 32768 \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.9
+```
+
+If you'd rather have vLLM pull the weights itself, swap the path for the HF id:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26B-A4B-it \
+    --port 8000 --max-model-len 32768 --dtype bfloat16 \
+    --gpu-memory-utilization 0.9
+```
+
+Client-side env vars (defaults in parens):
+- `CLINICIAN_VLLM_URL` (`http://localhost:8000/v1`) — endpoint the app hits.
+- `CLINICIAN_LLM_SERVED` (= `CLINICIAN_LLM`) — name the client sends as the OpenAI `model`. Must match what vLLM is serving (either the HF id or whatever you passed to `--served-model-name`).
+
 ## Models
-- **`google/gemma-4-26B-A4B-it`** — multimodal (text + imaging) reasoning, planning, summarization, and chat. Run locally on a GPU (`CLINICIAN_LLM_DEVICE`, default `cuda:0`).
+- **`google/gemma-4-26B-A4B-it`** — multimodal (text + imaging) reasoning, planning, summarization, and chat. Served by **vLLM** for throughput; the app talks to it via the OpenAI-compatible API (`CLINICIAN_VLLM_URL`, default `http://localhost:8000/v1`). Install vLLM separately: `pip install vllm`.
 - **`google/medsiglip-448`** — image-text embeddings for the chest-X-ray vector store, enabling natural-language search over imaging.
-- **`google/medasr`** — speech-to-text for live visit transcription (`CLINICIAN_ASR_DEVICE`, default `cuda:1`).
+- **`google/medasr`** — speech-to-text for live visit transcription (HF transformers pipeline, `CLINICIAN_ASR_DEVICE`, default `cuda:1`).
 - **`emilyalsentzer/Bio_ClinicalBERT`** — text embeddings for the clinical-notes vector store.
 
-Default 2-GPU layout: Gemma 4 alone on `cuda:0`; ASR + both embedders share `cuda:1` (`CLINICIAN_EMBED_DEVICE`, default `cuda:1`). All models are deployed locally so sensitive patient data never leaves the hospital environment.
+Default 2-GPU layout: Gemma 4 alone on `cuda:0` (via vLLM, pinned with `CUDA_VISIBLE_DEVICES=0` when starting the server); ASR + both embedders share `cuda:1` (`CLINICIAN_EMBED_DEVICE`, default `cuda:1`). All models are deployed locally so sensitive patient data never leaves the hospital environment.
 
 ### Pre-downloading weights to a chosen folder
 

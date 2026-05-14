@@ -28,7 +28,7 @@ from agent_demo import (
     make_initial_state,
     text_vectorstore,
 )
-from models import PIPE
+from models import LLM_SERVED_NAME, PIPE, VLLM_URL, _client as _vllm_client
 from prompts import PROMPT_REASON_AND_PLAN
 from utils import GEMMA4_THINK_SEP, parse_response_json
 
@@ -44,6 +44,21 @@ def trunc(s: str, n: int = 400) -> str:
     return s if len(s) <= n else s[:n] + f" …[+{len(s) - n} chars]"
 
 
+def _item_populated(it) -> bool:
+    if isinstance(it, str):
+        return bool(it.strip())
+    if isinstance(it, dict):
+        # A template skeleton has all string fields blank. Treat the item as
+        # populated if any non-evidence string field is non-empty.
+        for k, v in it.items():
+            if k == "evidence":
+                continue
+            if isinstance(v, str) and v.strip():
+                return True
+        return False
+    return False
+
+
 def summary_section_counts(summary: dict) -> dict:
     """How many populated items per section. Empty summary => all 0s."""
     if not isinstance(summary, dict):
@@ -51,12 +66,7 @@ def summary_section_counts(summary: dict) -> dict:
     out = {}
     for k, v in summary.items():
         if isinstance(v, list):
-            out[k] = sum(
-                1
-                for it in v
-                if (isinstance(it, dict) and any((it.get(f) or "").strip() for f in it))
-                or (isinstance(it, str) and it.strip())
-            )
+            out[k] = sum(1 for it in v if _item_populated(it))
         elif isinstance(v, str):
             out[k] = 1 if v.strip() else 0
         else:
@@ -121,6 +131,39 @@ def print_event(node: str, state: dict, raw: bool):
         print_update_event(state)
     else:
         print(trunc(pformat({k: state.get(k) for k in state if k != "audio_chunk"}), 800))
+
+
+# --- vLLM connectivity check -------------------------------------------
+
+def vllm_sanity() -> bool:
+    """Verify the vLLM endpoint is up and serving the expected model name.
+    Returns True on success; prints a diagnostic and returns False on
+    failure so callers can short-circuit before doing real work."""
+    hr("=")
+    print("vLLM CONNECTIVITY CHECK")
+    print(f"  endpoint:    {VLLM_URL}")
+    print(f"  served name: {LLM_SERVED_NAME}")
+    try:
+        models = _vllm_client.models.list()
+        ids = [m.id for m in models.data]
+        print(f"  available:   {ids}")
+        if LLM_SERVED_NAME not in ids:
+            print(
+                f"  ⚠ '{LLM_SERVED_NAME}' is not in the served-model list.\n"
+                f"    Either start vLLM with --served-model-name {LLM_SERVED_NAME}\n"
+                f"    or set CLINICIAN_LLM_SERVED to one of: {ids}"
+            )
+            return False
+    except Exception as e:
+        print(
+            f"  ⚠ Could not reach vLLM at {VLLM_URL}: {e!r}\n"
+            f"    Start the server first, e.g.:\n"
+            f"      CUDA_VISIBLE_DEVICES=0 vllm serve {LLM_SERVED_NAME} \\\n"
+            f"          --port 8000 --max-model-len 32768 --dtype bfloat16"
+        )
+        return False
+    print("  ✓ ok")
+    return True
 
 
 # --- vector store sanity check -----------------------------------------
@@ -221,6 +264,9 @@ def main():
     ap.add_argument("--no-stream", action="store_true",
                     help="Skip the full agent stream (only the sanity check + raw probe).")
     args = ap.parse_args()
+
+    if not vllm_sanity():
+        return 1
 
     state = make_initial_state(args.subject_id)
     vstore_sanity(args.subject_id)
