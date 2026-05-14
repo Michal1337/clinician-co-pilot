@@ -3,8 +3,10 @@ import os
 import torch
 from transformers import pipeline
 
-LLM_MODEL = os.environ.get("CLINICIAN_LLM", "google/gemma-4-26B-A4B-it")
-ASR_MODEL = os.environ.get("CLINICIAN_ASR", "google/medasr")
+from model_paths import resolve_model
+
+LLM_MODEL = resolve_model(os.environ.get("CLINICIAN_LLM", "google/gemma-4-26B-A4B-it"))
+ASR_MODEL = resolve_model(os.environ.get("CLINICIAN_ASR", "google/medasr"))
 # Default 2-GPU layout: Gemma (heavy) alone on cuda:0; the small models
 # (ASR + both embedders) share cuda:1. Override with env vars on boxes
 # with more or fewer GPUs.

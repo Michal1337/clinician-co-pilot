@@ -24,6 +24,25 @@ The app's sidebar exposes a **Subject ID** selector populated from whichever pat
 
 Default 2-GPU layout: Gemma 4 alone on `cuda:0`; ASR + both embedders share `cuda:1` (`CLINICIAN_EMBED_DEVICE`, default `cuda:1`). All models are deployed locally so sensitive patient data never leaves the hospital environment.
 
+### Pre-downloading weights to a chosen folder
+
+Set `CLINICIAN_MODELS_DIR` to a directory containing one subfolder per model (named after the model basename — the part after the `org/` slash). When set, the app resolves each model id to `$CLINICIAN_MODELS_DIR/<basename>/` instead of hitting the HuggingFace cache. If the subfolder is missing, the original HF id is used as a fallback.
+
+```powershell
+# pick any folder you have space in
+$env:CLINICIAN_MODELS_DIR = "D:\models\clinician-copilot"
+
+pip install -U "huggingface_hub[cli]"
+huggingface-cli login   # only if you haven't already
+
+huggingface-cli download google/gemma-4-26B-A4B-it     --local-dir "$env:CLINICIAN_MODELS_DIR\gemma-4-26B-A4B-it"
+huggingface-cli download google/medsiglip-448          --local-dir "$env:CLINICIAN_MODELS_DIR\medsiglip-448"
+huggingface-cli download google/medasr                 --local-dir "$env:CLINICIAN_MODELS_DIR\medasr"
+huggingface-cli download emilyalsentzer/Bio_ClinicalBERT --local-dir "$env:CLINICIAN_MODELS_DIR\Bio_ClinicalBERT"
+```
+
+Then any normal launch (`streamlit run app.py`, `python make_vdbs.py`) will pick up the local weights as long as `CLINICIAN_MODELS_DIR` is exported in the same shell.
+
 ## Problem statement
 Physicians today face a significant administrative burden that limits time spent with patients. For every hour of direct clinical face time, **nearly two additional hours are spent on EHR and desk work** during the clinic day. Outside office hours, physicians spend another 1–2 hours on personal time completing computer and clerical tasks (Sinsky et al., 2016). This imbalance reduces time available for patient interaction, increases cognitive load, and contributes to clinician burnout.
 
