@@ -77,6 +77,28 @@ class AgentState(TypedDict):
 
 # --- Stage 1 nodes -------------------------------------------------------
 
+def _summary_is_empty(summary: Dict[str, Any]) -> bool:
+    """A summary is 'empty' if every section is an empty list / blank.
+    The cold-start prompt regression sometimes makes the planner finish
+    on step 1 against this template; we coerce a real first query instead."""
+    if not isinstance(summary, dict):
+        return True
+    for v in summary.values():
+        if isinstance(v, list) and len(v) > 0:
+            return False
+        if isinstance(v, str) and v.strip():
+            return False
+    return True
+
+
+_COLD_START_PLAN = {
+    "action": "search_text",
+    "query": "active problems and current diagnoses",
+    "allowed_years": 3,
+    "thought": "cold-start: summary is empty, retrieve active problems first",
+}
+
+
 def node_reason_and_plan(state: AgentState) -> Dict:
     if state["step"] >= MAX_STEPS:
         return {
@@ -100,6 +122,16 @@ def node_reason_and_plan(state: AgentState) -> Dict:
     ]
     response = PIPE(messages, do_sample=False, max_new_tokens=2000)
     plan = validate_plan(parse_response_json(response))
+
+    # Guard: never let the planner finish before doing any retrieval at all.
+    # The empty-template cold-start frequently confuses the model into
+    # "nothing to retrieve, finish" on step 1.
+    if (
+        plan.get("action") == "finish"
+        and not state["action_history"]
+        and _summary_is_empty(state["summary"])
+    ):
+        plan = dict(_COLD_START_PLAN)
 
     return {
         "action": plan["action"],
