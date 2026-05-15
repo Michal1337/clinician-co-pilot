@@ -24,7 +24,7 @@ from transformers import pipeline
 
 from model_paths import resolve_model
 
-LLM_MODEL = resolve_model(os.environ.get("CLINICIAN_LLM", "google/gemma-4-26B-A4B-it"))
+LLM_MODEL = 'google/gemma-4-26B-A4B-it'
 ASR_MODEL = resolve_model(os.environ.get("CLINICIAN_ASR", "google/medasr"))
 ASR_DEVICE = os.environ.get("CLINICIAN_ASR_DEVICE", "cuda:1")
 

@@ -82,10 +82,10 @@ def print_planner_event(state: dict, raw: bool):
     print(f"  action:        {state.get('action')!r}")
     print(f"  query:         {state.get('query')!r}")
     print(f"  allowed_years: {state.get('allowed_years')!r}")
-    history = state.get("action_history") or []
-    if history:
-        last = history[-1]
-        print(f"  last decision: {trunc(pformat(last), 300)}")
+    # history = state.get("action_history") or []
+    # if history:
+    #     last = history[-1]
+    #     print(f"  last decision: {trunc(pformat(last), 300)}")
 
 
 def print_retrieval_event(state: dict):
@@ -121,16 +121,16 @@ def print_update_event(state: dict):
 
 
 def print_event(node: str, state: dict, raw: bool):
-    hr("·")
-    print(f"NODE: {node}")
+    # hr("·")
+    # print(f"NODE: {node}")
     if node == "reason_and_plan":
         print_planner_event(state, raw=raw)
-    elif node in ("text_vector_search", "image_vector_search"):
-        print_retrieval_event(state)
-    elif node == "update_summary":
-        print_update_event(state)
-    else:
-        print(trunc(pformat({k: state.get(k) for k in state if k != "audio_chunk"}), 800))
+    # elif node in ("text_vector_search", "image_vector_search"):
+    #     print_retrieval_event(state)
+    # elif node == "update_summary":
+    #     print_update_event(state)
+    # else:
+    #     print(trunc(pformat({k: state.get(k) for k in state if k != "audio_chunk"}), 800))
 
 
 # --- vLLM connectivity check -------------------------------------------

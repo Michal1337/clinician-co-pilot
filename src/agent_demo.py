@@ -34,7 +34,7 @@ from utils import (
 warnings.filterwarnings("ignore")
 
 
-MAX_STEPS = 5
+MAX_STEPS = 25
 
 text_vectorstore = FAISS.load_local(
     "../data/vdbs/text_vdb", TEXT_EMBEDDINGS, allow_dangerous_deserialization=True
