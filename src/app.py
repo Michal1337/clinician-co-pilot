@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from threading import Thread
 
@@ -19,7 +20,7 @@ from agent_demo import (
     stream_chat_answer,
     text_vectorstore,
 )
-from audio_agent import AUDIO_AGENT, CHUNK_SAMPLES, STEP_SAMPLES
+from audio_agent import AUDIO_AGENT, CHUNK_SAMPLES, SAMPLE_RATE, STEP_SAMPLES
 from demographics import load_patient_demographics
 from utils import (
     build_source_index,
@@ -394,10 +395,19 @@ def run_audio_agent_threaded(waveform, total_samples: int, state: dict):
     """Background-thread audio runner. Mutates the shared `state` dict
     only — no Streamlit widget / cache calls (those aren't thread-safe).
     The fragment polls `state["audio_progress"]` and `state["audio_done"]`
-    to render the UI."""
+    to render the UI.
+
+    Pace-adjusted: each iteration consumes ``STEP_SAMPLES`` worth of audio
+    (~9 s), so wall-clock time per iteration is held at ~9 s. The model's
+    actual ASR+summary time is subtracted from that budget so a faster
+    machine doesn't make the demo race ahead of real-time speech. Without
+    this, the entire visit transcript would appear in a few seconds and
+    the "live" framing breaks."""
+    step_seconds = STEP_SAMPLES / SAMPLE_RATE
     for start in range(0, total_samples, STEP_SAMPLES):
         if state.get("audio_stop"):
             break
+        tic = time.monotonic()
         chunk = waveform[start : start + CHUNK_SAMPLES]
         state["audio_chunk"] = chunk
         for event in AUDIO_AGENT.stream(state):
@@ -406,6 +416,10 @@ def run_audio_agent_threaded(waveform, total_samples: int, state: dict):
         state["audio_progress"] = min(
             1.0, (start + CHUNK_SAMPLES) / max(total_samples, 1)
         )
+        elapsed = time.monotonic() - tic
+        remaining = step_seconds - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
     state["audio_progress"] = 1.0
     state["audio_done"] = True
 
