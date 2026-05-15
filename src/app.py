@@ -92,9 +92,9 @@ def _action_status_line(state) -> str:
 # Rendering helpers
 # ========================================================================
 
-def render_patient_header(demographics: dict, summary: dict, container) -> None:
-    """Compact chart banner: name, age/sex, MRN. Blends with the page
-    background — just enough left-rule to signal 'patient context'."""
+def render_patient_header(demographics: dict, container) -> None:
+    """Compact sidebar chart card: name, age/sex, MRN. Narrow vertical
+    layout matches the sidebar width."""
     name = demographics.get("name") or "—"
     age = demographics.get("age")
     sex = demographics.get("sex")
@@ -105,20 +105,16 @@ def render_patient_header(demographics: dict, summary: dict, container) -> None:
 
     html = f"""
     <div style="
-        background:transparent;
         border-left:3px solid #1f4e79;
-        padding:4px 12px;
-        margin-bottom:6px;
-        font-size:13px;
+        padding:4px 10px;
+        margin:6px 0 10px 0;
         color:#1f2933;
-        display:flex;
-        align-items:baseline;
-        gap:14px;
-        flex-wrap:wrap;
+        font-size:13px;
+        line-height:1.35;
     ">
-      <span style="font-weight:600;font-size:15px;">{name}</span>
-      <span style="color:#52606d;">{age_sex}</span>
-      <span style="color:#7b8794;font-family:monospace;font-size:12px;">{mrn}</span>
+      <div style="font-weight:600;font-size:14px;">{name}</div>
+      <div style="color:#52606d;font-size:12px;">{age_sex}</div>
+      <div style="color:#7b8794;font-family:monospace;font-size:11px;">{mrn}</div>
     </div>
     """
     container.markdown(html, unsafe_allow_html=True)
@@ -465,6 +461,9 @@ with st.sidebar:
         key="selected_subject_id",
         help="Choose the patient whose record this session should reason over.",
     )
+
+    render_patient_header(get_demographics(int(selected)), st.sidebar)
+
     if st.button("Reset session", help="Clear summary, chat, and live transcription"):
         # Clean up uploaded image temp files before throwing away state.
         for qa in st.session_state.get("qa_history", []) or []:
@@ -520,15 +519,6 @@ def _save_uploaded_image(uploaded_file) -> str:
 # ========================================================================
 
 def main_ui():
-    # Always-visible chart banner across the full page width. The header
-    # placeholder is also re-rendered inside the summary streaming loop so
-    # the primary-problem field fills in live as the agent works.
-    demographics = get_demographics(int(st.session_state.active_subject_id))
-    header_box = st.empty()
-    render_patient_header(
-        demographics, st.session_state.state.get("summary"), header_box
-    )
-
     col_left, col_right = st.columns([6, 4])
 
     with col_left:
@@ -556,13 +546,6 @@ def main_ui():
                                 )
                                 render_imaging_evidence(
                                     st.session_state.state, imaging_box
-                                )
-                                # Refresh the banner so the primary-problem
-                                # and allergy badges populate live.
-                                render_patient_header(
-                                    demographics,
-                                    st.session_state.state.get("summary"),
-                                    header_box,
                                 )
 
                     st.session_state.stage1_done = True
@@ -609,6 +592,7 @@ def main_ui():
                         help="Run a single LLM pass to surface clinically significant "
                         "connections between the live conversation and the patient's "
                         "history.",
+                        width="stretch",
                     ):
                         with st.spinner("Scanning for clinical alerts…"):
                             st.session_state.alerts = compute_alerts(
@@ -619,6 +603,7 @@ def main_ui():
                         "Generate SOAP note",
                         key="soap_btn",
                         help="Draft a SOAP note from the captured visit.",
+                        width="stretch",
                     ):
                         with st.spinner("Drafting SOAP note…"):
                             st.session_state.soap_note = generate_soap_note(
