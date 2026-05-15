@@ -128,21 +128,15 @@ def _resolve_path_cached(candidate: str) -> Optional[str]:
 
 
 def resolve_image_path(doc) -> Optional[str]:
-    """Return an existing on-disk path for a doc that represents an image, or
-    None if no image can be found."""
-    candidates: List[str] = []
-    page = getattr(doc, "page_content", None)
-    if isinstance(page, str) and page:
-        candidates.append(page)
+    """Return an existing on-disk path for an imaging doc. Text docs have
+    no image-path metadata and are silently skipped."""
     meta = getattr(doc, "metadata", None) or {}
-    for key in ("image_path", "main_image_path", "path", "file_path"):
+    for key in ("main_image_path", "image_path", "path", "file_path"):
         v = meta.get(key)
         if isinstance(v, str) and v:
-            candidates.append(v)
-    for cand in candidates:
-        resolved = _resolve_path_cached(cand)
-        if resolved:
-            return resolved
+            resolved = _resolve_path_cached(v)
+            if resolved:
+                return resolved
     return None
 
 
