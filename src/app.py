@@ -19,11 +19,7 @@ from agent_demo import (
     text_vectorstore,
 )
 from audio_agent import AUDIO_AGENT, CHUNK_SAMPLES, STEP_SAMPLES
-from demographics import (
-    allergy_badges,
-    load_patient_demographics,
-    primary_problem,
-)
+from demographics import load_patient_demographics
 from utils import (
     build_source_index,
     collect_image_paths,
@@ -97,9 +93,8 @@ def _action_status_line(state) -> str:
 # ========================================================================
 
 def render_patient_header(demographics: dict, summary: dict, container) -> None:
-    """Always-visible chart banner: name, age/sex, MRN, primary problem,
-    allergies. Mirrors the top strip of a real EHR — this is what a
-    clinician orients to before reading anything else."""
+    """Compact chart banner: name, age/sex, MRN. Blends with the page
+    background — just enough left-rule to signal 'patient context'."""
     name = demographics.get("name") or "—"
     age = demographics.get("age")
     sex = demographics.get("sex")
@@ -108,52 +103,22 @@ def render_patient_header(demographics: dict, summary: dict, container) -> None:
         [f"{age} y/o" if age is not None else "", sex or ""]
     ).strip(" ·") or "Demographics pending"
 
-    problem = primary_problem(summary) or "No active problem captured yet"
-    badges = allergy_badges(summary)
-    if badges:
-        allergy_html = " ".join(
-            f"<span style='background:#fde2e2;color:#9b1c1c;border-radius:10px;"
-            f"padding:1px 8px;font-size:11px;margin-right:4px;white-space:nowrap;'>"
-            f"⚠ {b}</span>"
-            for b in badges
-        )
-    else:
-        allergy_html = (
-            "<span style='color:#888;font-size:11px;'>NKDA / not documented</span>"
-        )
-
     html = f"""
     <div style="
-        background:#eef2f7;
-        border-left:4px solid #1f4e79;
-        border-radius:4px;
-        padding:6px 12px;
-        margin-bottom:8px;
-        display:grid;
-        grid-template-columns: minmax(180px,auto) minmax(120px,auto) 1fr;
-        gap:14px 18px;
-        align-items:center;
+        background:transparent;
+        border-left:3px solid #1f4e79;
+        padding:4px 12px;
+        margin-bottom:6px;
         font-size:13px;
         color:#1f2933;
+        display:flex;
+        align-items:baseline;
+        gap:14px;
+        flex-wrap:wrap;
     ">
-      <div>
-        <div style="font-weight:600;font-size:15px;">{name}</div>
-        <div style="color:#52606d;font-size:12px;">{age_sex}
-          &nbsp;·&nbsp;<span style="font-family:monospace;">{mrn}</span>
-        </div>
-      </div>
-      <div>
-        <div style="color:#7b8794;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;">
-          Allergies
-        </div>
-        <div>{allergy_html}</div>
-      </div>
-      <div>
-        <div style="color:#7b8794;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;">
-          Primary problem
-        </div>
-        <div>{problem}</div>
-      </div>
+      <span style="font-weight:600;font-size:15px;">{name}</span>
+      <span style="color:#52606d;">{age_sex}</span>
+      <span style="color:#7b8794;font-family:monospace;font-size:12px;">{mrn}</span>
     </div>
     """
     container.markdown(html, unsafe_allow_html=True)
@@ -174,6 +139,27 @@ def render_imaging_evidence(state, container, max_images=4):
                 col.warning(f"Could not load {path}: {e}")
 
 
+_ACTIVE_STATUS_KEYWORDS = (
+    "active", "acute", "worsening", "new", "unstable", "decompensated", "uncontrolled",
+)
+_CHRONIC_STATUS_KEYWORDS = (
+    "stable", "chronic", "resolved", "history of", "remote", "controlled", "well-controlled",
+)
+
+
+def _problem_priority(item) -> int:
+    """Sort key for active_problems: acute/worsening first, chronic/resolved
+    last, everything else in the middle. Keeps order stable within buckets."""
+    if not isinstance(item, dict):
+        return 1
+    s = (item.get("status") or "").lower()
+    if any(k in s for k in _ACTIVE_STATUS_KEYWORDS):
+        return 0
+    if any(k in s for k in _CHRONIC_STATUS_KEYWORDS):
+        return 2
+    return 1
+
+
 def render_stage1(
     state,
     query_action_box,
@@ -181,6 +167,7 @@ def render_stage1(
     source_index=None,
     max_steps: int = 5,
     show_empty: bool = False,
+    max_visible: int = 6,
 ):
     """Render planner state and the patient summary."""
     action = state.get("action")
@@ -238,54 +225,18 @@ def render_stage1(
             return ""
         return f" <sub style='color:gray'>[{' | '.join(formatted)}]</sub>"
 
-    md_lines = ["### 🧾 Patient Summary\n"]
-    added_content = False
-
-    def render_section(title, items, keys, formatter, empty_msg=None):
-        nonlocal added_content
-        filtered = [i for i in items if item_has_any_text(i, keys)]
-        if not filtered and not (show_empty and empty_msg):
-            return
-        if filtered:
-            added_content = True
-        md_lines.append(f"#### {title}")
-        if filtered:
-            for i in filtered:
-                if isinstance(i, str):
-                    md_lines.append(f"- {i}")
-                else:
-                    md_lines.append(formatter(i))
-        else:
-            md_lines.append(f"<span style='color:#7b8794'>_{empty_msg}_</span>")
-        md_lines.append("")
-
+    # Per-section formatters. Each returns one markdown bullet.
     def format_problem(p):
         prob = (p.get("problem") or "").strip() or "(unspecified problem)"
         status = (p.get("status") or "").strip()
         line = f"- **{prob}**" + (f" — {status}" if status else "")
         return line + format_evidence_inline(get_list(p, "evidence"))
 
-    render_section(
-        "⚠️ Active Problems",
-        get_list(summary, "active_problems"),
-        ["problem", "status"],
-        format_problem,
-        empty_msg="No active problems documented in the available records.",
-    )
-
     def format_event(e):
         event_text = (e.get("event") or "").strip()
         date = (e.get("date") or "").strip()
         line = f"- {event_text}" + (f" — {date}" if date else "")
         return line + format_evidence_inline(get_list(e, "evidence"))
-
-    render_section(
-        "📝 Recent Events",
-        get_list(summary, "recent_events"),
-        ["event"],
-        format_event,
-        empty_msg="No recent events surfaced.",
-    )
 
     def format_med(m):
         name = (m.get("name") or "").strip()
@@ -303,14 +254,6 @@ def render_stage1(
         line = f"- {' — '.join(parts)}"
         return line + format_evidence_inline(get_list(m, "evidence"))
 
-    render_section(
-        "💊 Medications",
-        get_list(summary, "medications"),
-        ["name", "dose", "route"],
-        format_med,
-        empty_msg="No medications documented — confirm with patient.",
-    )
-
     def format_result(r):
         test = (r.get("test") or "").strip() or "(test)"
         result = (r.get("result") or "").strip()
@@ -322,27 +265,11 @@ def render_stage1(
             line += f" — {date}"
         return line + format_evidence_inline(get_list(r, "evidence"))
 
-    render_section(
-        "📊 Key Results",
-        get_list(summary, "key_results"),
-        ["test", "result"],
-        format_result,
-        empty_msg="No notable lab or test results retrieved.",
-    )
-
     def format_proc(p):
         proc = (p.get("procedure") or "").strip()
         date = (p.get("date") or "").strip()
         line = f"- {proc}" + (f" — {date}" if date else "")
         return line + format_evidence_inline(get_list(p, "evidence"))
-
-    render_section(
-        "🏥 Procedures",
-        get_list(summary, "procedures"),
-        ["procedure"],
-        format_proc,
-        empty_msg="No prior procedures documented — does the patient recall any surgeries?",
-    )
 
     def format_allergy(a):
         sub = (a.get("substance") or "").strip()
@@ -357,34 +284,72 @@ def render_stage1(
             line = "- (unspecified)"
         return line + format_evidence_inline(get_list(a, "evidence"))
 
-    render_section(
-        "⚠️ Allergies",
-        get_list(summary, "allergies"),
-        ["substance", "reaction"],
-        format_allergy,
-        empty_msg="NKDA / not documented — verify with patient.",
-    )
-
     def format_pending(p):
         item = (p.get("item") or "").strip()
         line = f"- {item}" if item else "- (unspecified)"
         return line + format_evidence_inline(get_list(p, "evidence"))
 
-    render_section(
-        "⏳ Pending Items",
-        get_list(summary, "pending_items"),
-        ["item"],
-        format_pending,
-        empty_msg="No outstanding follow-up items flagged.",
-    )
+    # (title, summary_key, text_keys, formatter, empty_msg, sort_fn or None)
+    sections = [
+        ("⚠️ Active Problems", "active_problems", ["problem", "status"], format_problem,
+         "No active problems documented in the available records.", _problem_priority),
+        ("📝 Recent Events", "recent_events", ["event"], format_event,
+         "No recent events surfaced.", None),
+        ("💊 Medications", "medications", ["name", "dose", "route"], format_med,
+         "No medications documented — confirm with patient.", None),
+        ("📊 Key Results", "key_results", ["test", "result"], format_result,
+         "No notable lab or test results retrieved.", None),
+        ("🏥 Procedures", "procedures", ["procedure"], format_proc,
+         "No prior procedures documented — does the patient recall any surgeries?", None),
+        ("⚠️ Allergies", "allergies", ["substance", "reaction"], format_allergy,
+         "NKDA / not documented — verify with patient.", None),
+        ("⏳ Pending Items", "pending_items", ["item"], format_pending,
+         "No outstanding follow-up items flagged.", None),
+    ]
 
-    if not added_content and not show_empty:
-        summary_box.markdown(
-            "### 🧾 Patient Summary\nNo populated sections in the summary yet."
-        )
-        return
+    def _fmt(item, formatter):
+        return f"- {item}" if isinstance(item, str) else formatter(item)
 
-    summary_box.markdown("\n".join(md_lines), unsafe_allow_html=True)
+    any_added = False
+    with summary_box.container():
+        st.markdown("### 🧾 Patient Summary")
+        for title, key, text_keys, formatter, empty_msg, sort_fn in sections:
+            items = get_list(summary, key)
+            filtered = [i for i in items if item_has_any_text(i, text_keys)]
+
+            if not filtered and not (show_empty and empty_msg):
+                continue
+
+            st.markdown(f"#### {title}")
+
+            if not filtered:
+                st.markdown(
+                    f"<span style='color:#7b8794'>_{empty_msg}_</span>",
+                    unsafe_allow_html=True,
+                )
+                continue
+
+            any_added = True
+            if sort_fn is not None:
+                filtered = sorted(filtered, key=sort_fn)
+
+            visible = filtered[:max_visible]
+            hidden = filtered[max_visible:]
+
+            st.markdown(
+                "\n".join(_fmt(i, formatter) for i in visible),
+                unsafe_allow_html=True,
+            )
+
+            if hidden:
+                with st.expander(f"Show {len(hidden)} more"):
+                    st.markdown(
+                        "\n".join(_fmt(i, formatter) for i in hidden),
+                        unsafe_allow_html=True,
+                    )
+
+        if not any_added and not show_empty:
+            st.markdown("_No populated sections in the summary yet._")
 
 
 def render_live_transcription(state, placeholder):
