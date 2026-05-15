@@ -121,9 +121,9 @@ def node_reason_and_plan(state: AgentState) -> Dict:
     response = PIPE(messages, do_sample=False, max_new_tokens=2000)
     plan = validate_plan(parse_response_json(response))
 
-    # Guard: never let the planner finish before doing any retrieval at all.
-    # The empty-template cold-start frequently confuses the model into
-    # "nothing to retrieve, finish" on step 1.
+    # Guard: never let the planner finish before doing any retrieval at
+    # all. The empty-template cold-start frequently confuses the model
+    # into "nothing to retrieve, finish" on step 1.
     if (
         plan.get("action") == "finish"
         and not state["action_history"]
