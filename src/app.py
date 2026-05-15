@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from threading import Thread
 
 import librosa
 import streamlit as st
@@ -389,35 +390,42 @@ def render_alerts(alerts, container):
             st.warning(block)
 
 
-def run_audio_agent(audio_path, transcript_placeholder, progress_placeholder=None):
-    """Stream audio chunks through the transcription/summarization graph."""
-    waveform = load_audio(audio_path)
-    total_samples = len(waveform)
-    progress_bar = (
-        progress_placeholder.progress(0.0, text="Streaming audio…")
-        if progress_placeholder is not None
-        else None
-    )
-
+def run_audio_agent_threaded(waveform, total_samples: int, state: dict):
+    """Background-thread audio runner. Mutates the shared `state` dict
+    only — no Streamlit widget / cache calls (those aren't thread-safe).
+    The fragment polls `state["audio_progress"]` and `state["audio_done"]`
+    to render the UI."""
     for start in range(0, total_samples, STEP_SAMPLES):
+        if state.get("audio_stop"):
+            break
         chunk = waveform[start : start + CHUNK_SAMPLES]
-        st.session_state.state["audio_chunk"] = chunk
-
-        for event in AUDIO_AGENT.stream(st.session_state.state):
+        state["audio_chunk"] = chunk
+        for event in AUDIO_AGENT.stream(state):
             for _, node_output in event.items():
-                st.session_state.state.update(node_output)
-                render_live_transcription(
-                    st.session_state.state, transcript_placeholder
-                )
+                state.update(node_output)
+        state["audio_progress"] = min(
+            1.0, (start + CHUNK_SAMPLES) / max(total_samples, 1)
+        )
+    state["audio_progress"] = 1.0
+    state["audio_done"] = True
 
-        if progress_bar is not None:
-            done = min(1.0, (start + CHUNK_SAMPLES) / max(total_samples, 1))
-            progress_bar.progress(
-                done, text=f"Streaming audio… {int(done * 100)}%"
-            )
 
-    if progress_bar is not None and progress_placeholder is not None:
-        progress_placeholder.empty()
+@st.fragment(run_every="1s")
+def render_live_panel_streaming():
+    """Auto-refreshing fragment for the live-visit panel while audio is
+    being processed in a background thread. Reruns once per second so the
+    transcript and progress bar update without blocking the rest of the
+    page (right-column chat stays fully responsive)."""
+    state = st.session_state.state
+    placeholder = st.empty()
+    render_live_transcription(state, placeholder)
+    pct = float(state.get("audio_progress", 0.0))
+    st.progress(pct, text=f"Streaming audio… {int(pct * 100)}%")
+    if state.get("audio_done"):
+        # Audio finished while we were rendering — force a full rerun so
+        # the static "done" path takes over and surfaces the post-visit
+        # action buttons.
+        st.rerun()
 
 
 # ========================================================================
@@ -484,6 +492,8 @@ def _ensure_state_for(subject_id: int):
         or st.session_state.get("active_subject_id") != subject_id
     ):
         st.session_state.state = make_initial_state(subject_id)
+        st.session_state.state["audio_done"] = False
+        st.session_state.state["audio_progress"] = 0.0
         st.session_state.active_subject_id = subject_id
         st.session_state.stage1_done = False
         st.session_state.live_transcription_started = False
@@ -562,29 +572,49 @@ def main_ui():
                 render_imaging_evidence(st.session_state.state, imaging_box)
 
         with tab_visit:
-            live_placeholder = st.empty()
-            alerts_box = st.empty()
-            soap_box = st.empty()
-
             if not st.session_state.live_transcription_started:
                 if st.button("Start Recording", key="start_record_btn"):
                     st.session_state.live_transcription_started = True
-                    progress_placeholder = st.empty()
-                    with st.spinner("Recording / streaming audio…"):
-                        run_audio_agent(
-                            "../data/conv.wav",
-                            live_placeholder,
-                            progress_placeholder=progress_placeholder,
-                        )
-                    st.success("✅ Processing complete.")
-                    # Re-run so the alerts/SOAP controls below pick up the
-                    # transcribed state immediately rather than after the
-                    # next user interaction.
+                    st.session_state.state["audio_done"] = False
+                    st.session_state.state["audio_progress"] = 0.0
+                    # Pre-load the waveform on the main thread (cache_data
+                    # isn't safe from a background thread), then hand off.
+                    waveform = load_audio("../data/conv.wav")
+                    thread = Thread(
+                        target=run_audio_agent_threaded,
+                        args=(waveform, len(waveform), st.session_state.state),
+                        daemon=True,
+                    )
+                    thread.start()
+                    st.session_state.audio_thread = thread
                     st.rerun()
+            elif not st.session_state.state.get("audio_done"):
+                # Background thread is processing audio. The fragment
+                # re-renders every second; the rest of the page (chat in
+                # the right column) is not blocked.
+                render_live_panel_streaming()
             else:
-                render_live_transcription(st.session_state.state, live_placeholder)
+                live_placeholder = st.empty()
+                render_live_transcription(
+                    st.session_state.state, live_placeholder
+                )
 
+                # Reserve placeholder positions in layout order:
+                # buttons → alerts → soap.
                 ctrl_cols = st.columns(2)
+                alerts_box = st.empty()
+                soap_box = st.empty()
+
+                # Pre-populate the placeholders from session state BEFORE
+                # the button handlers run. That way, if one button is
+                # clicked, the OTHER section's content stays visible while
+                # the spinner is up — instead of both vanishing.
+                render_alerts(st.session_state.alerts, alerts_box)
+                if st.session_state.soap_note:
+                    with soap_box.container():
+                        st.markdown("### 📝 SOAP note draft")
+                        st.markdown(st.session_state.soap_note)
+
                 with ctrl_cols[0]:
                     if st.button(
                         "Refresh alerts",
@@ -598,6 +628,7 @@ def main_ui():
                             st.session_state.alerts = compute_alerts(
                                 st.session_state.state
                             )
+                        render_alerts(st.session_state.alerts, alerts_box)
                 with ctrl_cols[1]:
                     if st.button(
                         "Generate SOAP note",
@@ -609,12 +640,9 @@ def main_ui():
                             st.session_state.soap_note = generate_soap_note(
                                 st.session_state.state
                             )
-
-                render_alerts(st.session_state.alerts, alerts_box)
-                if st.session_state.soap_note:
-                    with soap_box.container():
-                        st.markdown("### 📝 SOAP note draft")
-                        st.markdown(st.session_state.soap_note)
+                        with soap_box.container():
+                            st.markdown("### 📝 SOAP note draft")
+                            st.markdown(st.session_state.soap_note)
 
     with col_right:
         st.header("💬 Clinical Chat")
