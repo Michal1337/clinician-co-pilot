@@ -21,7 +21,7 @@ DATA_DIR = Path("../data")
 HISTORY_GLOB = str(DATA_DIR / "patient_*_history.json")
 
 splitter = RecursiveCharacterTextSplitter(
-    chunk_size=128, chunk_overlap=32, length_function=lambda x: len(x.split())
+    chunk_size=384, chunk_overlap=96, length_function=lambda x: len(x.split())
 )
 
 

@@ -124,32 +124,35 @@ def render_patient_header(demographics: dict, summary: dict, container) -> None:
 
     html = f"""
     <div style="
-        background:#ffffff;
-        border:1px solid #e2e6eb;
+        background:#eef2f7;
         border-left:4px solid #1f4e79;
-        border-radius:6px;
-        padding:8px 14px;
-        margin-bottom:10px;
-        display:flex;
-        gap:18px;
+        border-radius:4px;
+        padding:6px 12px;
+        margin-bottom:8px;
+        display:grid;
+        grid-template-columns: minmax(180px,auto) minmax(120px,auto) 1fr;
+        gap:14px 18px;
         align-items:center;
-        flex-wrap:wrap;
         font-size:13px;
+        color:#1f2933;
     ">
-      <div style="font-weight:600;font-size:16px;color:#1f2933;">{name}</div>
-      <div style="color:#52606d;">{age_sex}</div>
-      <div style="color:#52606d;font-family:monospace;font-size:12px;">{mrn}</div>
-      <div style="flex:1;min-width:180px;color:#1f2933;">
-        <span style="color:#7b8794;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">
-          Primary problem
-        </span><br>
-        {problem}
+      <div>
+        <div style="font-weight:600;font-size:15px;">{name}</div>
+        <div style="color:#52606d;font-size:12px;">{age_sex}
+          &nbsp;·&nbsp;<span style="font-family:monospace;">{mrn}</span>
+        </div>
       </div>
       <div>
-        <span style="color:#7b8794;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">
+        <div style="color:#7b8794;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;">
           Allergies
-        </span><br>
-        {allergy_html}
+        </div>
+        <div>{allergy_html}</div>
+      </div>
+      <div>
+        <div style="color:#7b8794;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;">
+          Primary problem
+        </div>
+        <div>{problem}</div>
       </div>
     </div>
     """

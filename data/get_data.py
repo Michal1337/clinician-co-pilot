@@ -194,7 +194,30 @@ def build_patient_history(subject_id: int, t: dict, args) -> dict:
     return history
 
 
-def attach_xrays(history: dict, cxr_dataset, output_dir: Path):
+def _shift_study_date(raw, shift) -> str:
+    """MIMIC-CXR ``StudyDate`` is a date-shifted YYYYMMDD (often as int or
+    string). Apply the same shift used for admissions so the timeline lines
+    up. Returns ISO YYYY-MM-DD on success, the original value on failure."""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if len(s) == 8 and s.isdigit():
+        try:
+            dt = datetime.strptime(s, "%Y%m%d")
+            return (dt + shift).strftime("%Y-%m-%d")
+        except ValueError:
+            return s
+    # Already ISO-ish? Try to parse and shift.
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return (dt + shift).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
+
+
+def attach_xrays(history: dict, cxr_dataset, output_dir: Path, shift):
     sid = str(history["subject_id"])
     cxr_list = cxr_dataset.filter(lambda r, sid=sid: r["subject_id"] == sid)
 
@@ -216,7 +239,7 @@ def attach_xrays(history: dict, cxr_dataset, output_dir: Path):
                 "findings": r.get("findings_section"),
                 "impression": r.get("impression_section"),
                 "main_image_path": str(image_filename),
-                "study_date": r.get("StudyDate"),
+                "study_date": _shift_study_date(r.get("StudyDate"), shift),
                 "study_time": r.get("StudyTime"),
             }
         )
@@ -234,13 +257,14 @@ def main():
     print(f"Loading CXR dataset {args.cxr_dataset} (split={args.cxr_split})")
     cxr_dataset = load_dataset(args.cxr_dataset, "findings_section", split=args.cxr_split)
 
+    shift = relativedelta(years=args.date_shift_years, months=args.date_shift_months)
     for sid in subject_ids:
         try:
             history = build_patient_history(sid, tables, args)
         except ValueError as e:
             print(f"Skipping {sid}: {e}")
             continue
-        history = attach_xrays(history, cxr_dataset, args.output_dir)
+        history = attach_xrays(history, cxr_dataset, args.output_dir, shift)
         out_path = args.output_dir / f"patient_{sid}_history.json"
         with open(out_path, "w") as f:
             json.dump(history, f, indent=2)
