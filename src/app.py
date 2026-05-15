@@ -105,16 +105,16 @@ def render_patient_header(demographics: dict, container) -> None:
 
     html = f"""
     <div style="
-        border-left:3px solid #1f4e79;
-        padding:4px 10px;
-        margin:6px 0 10px 0;
-        color:#1f2933;
-        font-size:13px;
-        line-height:1.35;
+        background:#1f4e79;
+        border-radius:6px;
+        padding:10px 14px;
+        margin:8px 0 14px 0;
+        color:#ffffff;
+        line-height:1.4;
     ">
-      <div style="font-weight:600;font-size:14px;">{name}</div>
-      <div style="color:#52606d;font-size:12px;">{age_sex}</div>
-      <div style="color:#7b8794;font-family:monospace;font-size:11px;">{mrn}</div>
+      <div style="font-weight:600;font-size:18px;">{name}</div>
+      <div style="font-size:15px;opacity:0.95;">{age_sex}</div>
+      <div style="font-family:monospace;font-size:13px;opacity:0.85;margin-top:2px;">{mrn}</div>
     </div>
     """
     container.markdown(html, unsafe_allow_html=True)
@@ -376,7 +376,7 @@ def render_alerts(alerts, container):
         container.info("No clinical alerts to surface yet.")
         return
     with container.container():
-        st.markdown("#### 🚨 Clinical alerts")
+        st.markdown("### 🚨 Clinical alerts")
         for a in alerts:
             title = a.get("title") or "(alert)"
             rationale = a.get("rationale") or ""
@@ -613,7 +613,7 @@ def main_ui():
                 render_alerts(st.session_state.alerts, alerts_box)
                 if st.session_state.soap_note:
                     with soap_box.container():
-                        st.markdown("#### 📝 SOAP note draft")
+                        st.markdown("### 📝 SOAP note draft")
                         st.markdown(st.session_state.soap_note)
 
     with col_right:

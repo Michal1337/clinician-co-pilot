@@ -297,27 +297,48 @@ def chat_retrieve(state: AgentState) -> AgentState:
 
 def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
     """Yield deltas from an upstream stream, hiding Gemma 4's optional
-    `<channel|>thought<channel|>` prefix from the user-visible output.
-    If no separator shows up after ~4000 buffered chars, give up and flush
-    — the model is just answering directly."""
+    ``<channel|>thought<channel|>`` prefix from the user-visible output.
+
+    Detection: peek at the first non-whitespace character of the stream.
+    If it isn't ``<`` there's no thinking-channel header coming, so we
+    flush and switch to immediate passthrough — this is the common case
+    when vLLM serves Gemma 4 with thinking disabled, and the previous
+    blanket-buffer logic made answers appear in one shot at end-of-stream
+    instead of streaming."""
     pending = ""
-    in_thought = True
+    mode = "deciding"  # "deciding" | "in_thought" | "passthrough"
     for chunk in source:
-        if in_thought:
-            pending += chunk
-            if GEMMA4_THINK_SEP in pending:
-                in_thought = False
-                _, after = pending.split(GEMMA4_THINK_SEP, 1)
-                pending = ""
-                if after:
-                    yield after
-            elif len(pending) > 4000:
-                in_thought = False
+        if mode == "passthrough":
+            yield chunk
+            continue
+
+        pending += chunk
+
+        if mode == "deciding":
+            stripped = pending.lstrip()
+            if not stripped:
+                continue  # whitespace-only so far, keep peeking
+            if stripped.startswith("<"):
+                mode = "in_thought"
+            else:
+                mode = "passthrough"
                 yield pending
                 pending = ""
-        else:
-            yield chunk
-    if in_thought and pending:
+                continue
+
+        # mode == "in_thought"
+        if GEMMA4_THINK_SEP in pending:
+            mode = "passthrough"
+            _, after = pending.split(GEMMA4_THINK_SEP, 1)
+            pending = ""
+            if after:
+                yield after
+        elif len(pending) > 4000:
+            # Safety net for a malformed long thinking block.
+            mode = "passthrough"
+            yield pending
+            pending = ""
+    if pending:
         yield pending
 
 
