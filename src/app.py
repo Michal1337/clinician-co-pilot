@@ -197,15 +197,13 @@ def render_stage1(
         return []
 
     def item_has_any_text(item, keys):
+        """An item is renderable only if at least one of its content
+        fields (problem / name / event / etc.) is non-empty. Evidence
+        alone is not enough — a citation pointing nowhere is noise."""
         if isinstance(item, str):
             return nonempty_str(item)
         for k in keys:
             if nonempty_str(item.get(k, "")):
-                return True
-        for ev in get_list(item, "evidence"):
-            if nonempty_str(ev.get("source_id", "")) or nonempty_str(
-                ev.get("date", "")
-            ):
                 return True
         return False
 
