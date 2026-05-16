@@ -72,16 +72,14 @@ def parse_args():
         help="Directory where patient_*.json and cxrs/ are written.",
     )
     p.add_argument(
-        "--date-shift-years",
-        type=int,
-        default=-126,
-        help="Years offset applied to MIMIC's date-shifted timestamps.",
-    )
-    p.add_argument(
-        "--date-shift-months",
-        type=int,
-        default=8,
-        help="Months offset applied to MIMIC's date-shifted timestamps.",
+        "--target-date",
+        default="2025-12-01",
+        help="MIMIC anonymizes by shifting every patient's timeline forward "
+             "by a different ~100-year offset, so a single global shift only "
+             "works for one patient. Instead, we compute the shift "
+             "PER-PATIENT so each patient's most recent admission lands "
+             "near this target date (YYYY-MM-DD). Picks ~6 months before "
+             "'today' by default so the chart reads as a real recent record.",
     )
     return p.parse_args()
 
@@ -124,12 +122,33 @@ def load_tables(data_path: str, notes_path: str):
     }
 
 
-def build_patient_history(subject_id: int, t: dict, args) -> dict:
+def _compute_patient_shift(patient_adm, target_date_str: str):
+    """MIMIC anonymizes by shifting every patient's timeline forward by a
+    different (typically 100+-year) offset. Pick a per-patient shift so
+    the patient's latest admission discharge lands near ``target_date``.
+    Returns a ``relativedelta`` to add to every date for that patient."""
+    target_dt = datetime.strptime(target_date_str, "%Y-%m-%d")
+    candidates = []
+    for col in ("dischtime", "admittime"):
+        if col not in patient_adm.columns:
+            continue
+        for s in patient_adm[col].dropna():
+            try:
+                candidates.append(datetime.strptime(str(s), "%Y-%m-%d %H:%M:%S"))
+            except (ValueError, TypeError):
+                continue
+    if not candidates:
+        return relativedelta(years=0)
+    return relativedelta(target_dt, max(candidates))
+
+
+def build_patient_history(subject_id: int, t: dict, args):
     pat_row = t["patients"][t["patients"].subject_id == subject_id]
     if pat_row.empty:
         raise ValueError(f"Subject {subject_id} not found in patients table.")
     patient = pat_row.iloc[0]
     patient_adm = t["admissions"][t["admissions"].subject_id == subject_id]
+    shift = _compute_patient_shift(patient_adm, args.target_date)
 
     history = {
         "subject_id": subject_id,
@@ -176,7 +195,6 @@ def build_patient_history(subject_id: int, t: dict, args) -> dict:
 
         adm_dt = datetime.strptime(adm["admittime"], "%Y-%m-%d %H:%M:%S")
         dis_dt = datetime.strptime(adm["dischtime"], "%Y-%m-%d %H:%M:%S")
-        shift = relativedelta(years=args.date_shift_years, months=args.date_shift_months)
 
         history["admissions"].append(
             {
@@ -191,7 +209,7 @@ def build_patient_history(subject_id: int, t: dict, args) -> dict:
             }
         )
 
-    return history
+    return history, shift
 
 
 def _shift_study_date(raw, shift) -> str:
@@ -257,10 +275,9 @@ def main():
     print(f"Loading CXR dataset {args.cxr_dataset} (split={args.cxr_split})")
     cxr_dataset = load_dataset(args.cxr_dataset, "findings_section", split=args.cxr_split)
 
-    shift = relativedelta(years=args.date_shift_years, months=args.date_shift_months)
     for sid in subject_ids:
         try:
-            history = build_patient_history(sid, tables, args)
+            history, shift = build_patient_history(sid, tables, args)
         except ValueError as e:
             print(f"Skipping {sid}: {e}")
             continue
@@ -269,7 +286,8 @@ def main():
         with open(out_path, "w") as f:
             json.dump(history, f, indent=2)
         print(f"Wrote {out_path} ({len(history['admissions'])} admissions, "
-              f"{len(history['xray_studies'])} CXR studies)")
+              f"{len(history['xray_studies'])} CXR studies, "
+              f"shift={shift.years}y{shift.months:+d}m -> target {args.target_date})")
 
 
 if __name__ == "__main__":
