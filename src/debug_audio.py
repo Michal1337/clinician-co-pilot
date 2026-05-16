@@ -3,9 +3,11 @@
 # data/conv.wav directly.
 
 import argparse
+import os
 import time
 
 import librosa
+import numpy as np
 
 from audio_agent import (
     AUDIO_AGENT,
@@ -13,6 +15,14 @@ from audio_agent import (
     SAMPLE_RATE,
     STEP_SAMPLES,
 )
+
+
+def _default_audio() -> str:
+    for ext in (".mp3", ".wav", ".flac", ".m4a", ".ogg"):
+        p = f"../data/conv{ext}"
+        if os.path.exists(p):
+            return p
+    return "../data/conv.wav"
 
 
 def make_state(num_retriev_text: int = 0, num_retriev_img: int = 0):
@@ -42,7 +52,7 @@ def make_state(num_retriev_text: int = 0, num_retriev_img: int = 0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--audio", default="../data/conv.wav")
+    ap.add_argument("--audio", default=_default_audio())
     ap.add_argument(
         "--no-summary",
         action="store_true",
@@ -74,8 +84,17 @@ def main():
         chunk = waveform[start : start + CHUNK_SAMPLES]
         state["audio_chunk"] = chunk
 
-        print(f"\n[chunk {i:02d}] start_sample={start} "
-              f"({start / SAMPLE_RATE:.1f}s — {(start + len(chunk)) / SAMPLE_RATE:.1f}s)")
+        # Waveform stats so we can rule out "audio is silent" issues.
+        if len(chunk) > 0:
+            peak = float(np.max(np.abs(chunk)))
+            rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+        else:
+            peak, rms = 0.0, 0.0
+        print(f"\n[chunk {i:02d}] samples={len(chunk)} "
+              f"({start / SAMPLE_RATE:.1f}s — {(start + len(chunk)) / SAMPLE_RATE:.1f}s)"
+              f"  peak={peak:.3f}  rms={rms:.4f}")
+        if peak < 0.01:
+            print("  ⚠ near-silent chunk (peak < 0.01) — MedASR will likely return empty")
 
         for event in AUDIO_AGENT.stream(state):
             for node, node_output in event.items():

@@ -64,8 +64,15 @@ def _load_audio_cached(audio_path: str, mtime: float):
     return waveform
 
 
+def find_conv_audio() -> str:
+    for ext in (".mp3", ".wav", ".flac", ".m4a", ".ogg"):
+        p = f"../data/conv{ext}"
+        if os.path.exists(p):
+            return p
+    return "../data/conv.wav"
+
+
 def load_audio(audio_path: str):
-    # Pass mtime into the cache key so an updated conv.wav invalidates it.
     return _load_audio_cached(audio_path, os.path.getmtime(audio_path))
 
 
@@ -585,7 +592,7 @@ def main_ui():
                     st.session_state.live_transcription_started = True
                     st.session_state.state["audio_done"] = False
                     st.session_state.state["audio_progress"] = 0.0
-                    waveform = load_audio("../data/conv.wav")
+                    waveform = load_audio(find_conv_audio())
                     thread = Thread(
                         target=run_audio_agent_threaded,
                         args=(waveform, len(waveform), st.session_state.state),
