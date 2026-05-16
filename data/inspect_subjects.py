@@ -1,20 +1,5 @@
 #!/usr/bin/env python
-"""Cross-reference candidate MIMIC-IV subject IDs against admissions /
-diagnoses / procedures / meds / discharge notes so you can pick the
-richest patient for the demo.
-
-Use after a CXR-count run has narrowed the field to ~10-20 subjects.
-
-Example:
-    python inspect_subjects.py 13475033 19182863 15131736 14851532 \\
-                               10933609 14841168 17340686 16826047 \\
-                               --data-path /path/to/mimiciv/3.1 \\
-                               --notes-path /path/to/mimic-iv-note/2.2
-
-Outputs a single table sorted by a composite score (admissions × note
-content × diagnosis breadth), so the first row is the best demo
-candidate. Skips lab counting on purpose — labs.csv.gz is ~50 GB and the
-demo doesn't depend on lab volume per se."""
+# Cross-reference MIMIC-IV subject IDs to pick the richest demo patient.
 
 import argparse
 import os
@@ -134,8 +119,6 @@ def main():
         )
 
     df = pd.DataFrame(rows)
-    # Composite score: heavy on note content + diagnostic breadth, plus
-    # admissions and a small bonus for longitudinal span (>=1y).
     df["score"] = (
         df["note_kchars"] * 1.0
         + df["dx_unique"] * 2.0

@@ -76,9 +76,6 @@ class AgentState(TypedDict):
 # --- Stage 1 nodes -------------------------------------------------------
 
 def _summary_is_empty(summary: Dict[str, Any]) -> bool:
-    """A summary is 'empty' if every section is an empty list / blank.
-    The cold-start prompt regression sometimes makes the planner finish
-    on step 1 against this template; we coerce a real first query instead."""
     if not isinstance(summary, dict):
         return True
     for v in summary.values():
@@ -121,9 +118,7 @@ def node_reason_and_plan(state: AgentState) -> Dict:
     response = PIPE(messages, do_sample=False, max_new_tokens=2000)
     plan = validate_plan(parse_response_json(response))
 
-    # Guard: never let the planner finish before doing any retrieval at
-    # all. The empty-template cold-start frequently confuses the model
-    # into "nothing to retrieve, finish" on step 1.
+    # Don't let the planner finish on step 1 against an empty template.
     if (
         plan.get("action") == "finish"
         and not state["action_history"]
@@ -240,8 +235,6 @@ def node_make_query(state: AgentState) -> Dict:
 
 
 def _build_answer_messages(state: AgentState) -> List[Dict[str, Any]]:
-    """Construct the message list passed to the LLM for the chat-answer step.
-    Shared between the non-streaming node and the streaming helper."""
     user_content = [
         {
             "type": "text",
@@ -284,8 +277,6 @@ def node_answer_question(state: AgentState) -> Dict:
 # --- Streaming helpers --------------------------------------------------
 
 def chat_retrieve(state: AgentState) -> AgentState:
-    """Run only the make_query + retrieval part of a chat turn so the app can
-    stream the answer separately."""
     plan_update = node_make_query(state)
     state.update(plan_update)
     if state["action"] == "search_imaging":
@@ -296,17 +287,11 @@ def chat_retrieve(state: AgentState) -> AgentState:
 
 
 def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
-    """Yield deltas from an upstream stream, hiding Gemma 4's optional
-    ``<channel|>thought<channel|>`` prefix from the user-visible output.
-
-    Detection: peek at the first non-whitespace character of the stream.
-    If it isn't ``<`` there's no thinking-channel header coming, so we
-    flush and switch to immediate passthrough — this is the common case
-    when vLLM serves Gemma 4 with thinking disabled, and the previous
-    blanket-buffer logic made answers appear in one shot at end-of-stream
-    instead of streaming."""
+    # Hides Gemma 4's optional `<channel|>thought<channel|>` prefix; if
+    # the stream doesn't start with `<` there's no thought channel, so
+    # passthrough immediately instead of buffering the whole response.
     pending = ""
-    mode = "deciding"  # "deciding" | "in_thought" | "passthrough"
+    mode = "deciding"
     for chunk in source:
         if mode == "passthrough":
             yield chunk
@@ -317,7 +302,7 @@ def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
         if mode == "deciding":
             stripped = pending.lstrip()
             if not stripped:
-                continue  # whitespace-only so far, keep peeking
+                continue
             if stripped.startswith("<"):
                 mode = "in_thought"
             else:
@@ -326,7 +311,6 @@ def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
                 pending = ""
                 continue
 
-        # mode == "in_thought"
         if GEMMA4_THINK_SEP in pending:
             mode = "passthrough"
             _, after = pending.split(GEMMA4_THINK_SEP, 1)
@@ -334,7 +318,6 @@ def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
             if after:
                 yield after
         elif len(pending) > 4000:
-            # Safety net for a malformed long thinking block.
             mode = "passthrough"
             yield pending
             pending = ""
@@ -345,9 +328,6 @@ def _strip_thinking_channel(source: Iterator[str]) -> Iterator[str]:
 def stream_chat_answer(
     state: AgentState, max_new_tokens: int = 2000
 ) -> Iterator[str]:
-    """Yield text deltas for the assistant's reply, hiding Gemma 4's
-    optional thinking channel from the user-visible stream. Falls back to
-    a single blocking generation if vLLM streaming isn't available."""
     messages = _build_answer_messages(state)
     try:
         yield from _strip_thinking_channel(
@@ -359,8 +339,6 @@ def stream_chat_answer(
 
 
 def commit_chat_answer(state: AgentState, answer_text: str) -> Dict:
-    """Append a streamed answer to the chat history. Mirrors what
-    `node_answer_question` does at the end of a non-streaming turn."""
     messages = _build_answer_messages(state)
     messages.append(
         {"role": "assistant", "content": [{"type": "text", "text": answer_text}]}
@@ -371,8 +349,6 @@ def commit_chat_answer(state: AgentState, answer_text: str) -> Dict:
 # --- Alerts and SOAP note (out-of-graph helpers) ------------------------
 
 def compute_alerts(state: AgentState) -> List[Dict[str, str]]:
-    """Run a single LLM call to surface clinically significant intersections
-    between the patient summary and the live conversation."""
     transcript = (state.get("full_transcript") or "").strip()
     if not transcript:
         return []
@@ -415,8 +391,6 @@ def compute_alerts(state: AgentState) -> List[Dict[str, str]]:
 
 
 def generate_soap_note(state: AgentState) -> str:
-    """Draft a SOAP note from the patient summary + live transcript +
-    conversation summary. Returns markdown."""
     transcript = (state.get("full_transcript") or "").strip()
     if not transcript:
         return "_No conversation captured yet — start the live transcription first._"
@@ -491,8 +465,6 @@ CHAT_TURN_AGENT = graph.compile()
 
 
 def make_initial_state(subject_id: int) -> Dict[str, Any]:
-    """Build a fresh agent state for a given patient. Templates are
-    deep-copied so concurrent sessions don't share mutable structures."""
     return {
         "subject_id": int(subject_id),
         "action": "",

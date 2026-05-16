@@ -1,16 +1,5 @@
 #!/usr/bin/env python
-"""Extract per-patient histories from MIMIC-IV (PhysioNet) and the
-MIMIC-CXR-RRG findings dataset.
-
-Output: one ``patient_<subject_id>_history.json`` per patient in the current
-directory plus an ``cxrs/`` folder of saved chest-X-ray JPEGs. The files
-are then consumed by ``../src/make_vdbs.py``.
-
-Usage:
-    python get_data.py --subjects 13221453 18765432
-    python get_data.py --subjects-file subjects.txt
-    # or fall back to the default demo patient if no flag is given.
-"""
+# Extract per-patient histories from MIMIC-IV + MIMIC-CXR-RRG.
 
 import argparse
 import json
@@ -74,12 +63,8 @@ def parse_args():
     p.add_argument(
         "--target-date",
         default="2025-12-01",
-        help="MIMIC anonymizes by shifting every patient's timeline forward "
-             "by a different ~100-year offset, so a single global shift only "
-             "works for one patient. Instead, we compute the shift "
-             "PER-PATIENT so each patient's most recent admission lands "
-             "near this target date (YYYY-MM-DD). Picks ~6 months before "
-             "'today' by default so the chart reads as a real recent record.",
+        help="Per-patient shift target: each patient's latest admission "
+             "lands near this date (YYYY-MM-DD).",
     )
     return p.parse_args()
 
@@ -123,10 +108,6 @@ def load_tables(data_path: str, notes_path: str):
 
 
 def _compute_patient_shift(patient_adm, target_date_str: str):
-    """MIMIC anonymizes by shifting every patient's timeline forward by a
-    different (typically 100+-year) offset. Pick a per-patient shift so
-    the patient's latest admission discharge lands near ``target_date``.
-    Returns a ``relativedelta`` to add to every date for that patient."""
     target_dt = datetime.strptime(target_date_str, "%Y-%m-%d")
     candidates = []
     for col in ("dischtime", "admittime"):
@@ -213,9 +194,6 @@ def build_patient_history(subject_id: int, t: dict, args):
 
 
 def _shift_study_date(raw, shift) -> str:
-    """MIMIC-CXR ``StudyDate`` is a date-shifted YYYYMMDD (often as int or
-    string). Apply the same shift used for admissions so the timeline lines
-    up. Returns ISO YYYY-MM-DD on success, the original value on failure."""
     if raw is None:
         return ""
     s = str(raw).strip()
@@ -225,7 +203,6 @@ def _shift_study_date(raw, shift) -> str:
             return (dt + shift).strftime("%Y-%m-%d")
         except ValueError:
             return s
-    # Already ISO-ish? Try to parse and shift.
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
             dt = datetime.strptime(s, fmt)

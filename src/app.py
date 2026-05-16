@@ -95,8 +95,6 @@ def _action_status_line(state) -> str:
 # ========================================================================
 
 def render_patient_header(demographics: dict, container) -> None:
-    """Compact sidebar chart card: name, age/sex, MRN. Narrow vertical
-    layout matches the sidebar width."""
     name = demographics.get("name") or "—"
     age = demographics.get("age")
     sex = demographics.get("sex")
@@ -132,7 +130,7 @@ def render_imaging_evidence(state, container, max_images=4):
         cols = st.columns(min(len(paths), max_images))
         for col, path in zip(cols, paths):
             try:
-                col.image(path, caption=os.path.basename(path), width="stretch")
+                col.image(path, width="stretch")
             except Exception as e:
                 col.warning(f"Could not load {path}: {e}")
 
@@ -143,11 +141,25 @@ _ACTIVE_STATUS_KEYWORDS = (
 _CHRONIC_STATUS_KEYWORDS = (
     "stable", "chronic", "resolved", "history of", "remote", "controlled", "well-controlled",
 )
+_REDUNDANT_STATUS = {"active", ""}
+_UNKNOWN_DATE_TOKENS = {"unknown", "n/a", "none", "null", "?", "-", "--"}
+
+
+def _clean_date(s) -> str:
+    s = (s or "").strip()
+    if s.lower() in _UNKNOWN_DATE_TOKENS:
+        return ""
+    return s
+
+
+def _meaningful_status(s) -> str:
+    s = (s or "").strip()
+    if s.lower() in _REDUNDANT_STATUS:
+        return ""
+    return s
 
 
 def _problem_priority(item) -> int:
-    """Sort key for active_problems: acute/worsening first, chronic/resolved
-    last, everything else in the middle. Keeps order stable within buckets."""
     if not isinstance(item, dict):
         return 1
     s = (item.get("status") or "").lower()
@@ -197,9 +209,6 @@ def render_stage1(
         return []
 
     def item_has_any_text(item, keys):
-        """An item is renderable only if at least one of its content
-        fields (problem / name / event / etc.) is non-empty. Evidence
-        alone is not enough — a citation pointing nowhere is noise."""
         if isinstance(item, str):
             return nonempty_str(item)
         for k in keys:
@@ -224,13 +233,13 @@ def render_stage1(
     # Per-section formatters. Each returns one markdown bullet.
     def format_problem(p):
         prob = (p.get("problem") or "").strip() or "(unspecified problem)"
-        status = (p.get("status") or "").strip()
+        status = _meaningful_status(p.get("status"))
         line = f"- **{prob}**" + (f" — {status}" if status else "")
         return line + format_evidence_inline(get_list(p, "evidence"))
 
     def format_event(e):
         event_text = (e.get("event") or "").strip()
-        date = (e.get("date") or "").strip()
+        date = _clean_date(e.get("date"))
         line = f"- {event_text}" + (f" — {date}" if date else "")
         return line + format_evidence_inline(get_list(e, "evidence"))
 
@@ -253,7 +262,7 @@ def render_stage1(
     def format_result(r):
         test = (r.get("test") or "").strip() or "(test)"
         result = (r.get("result") or "").strip()
-        date = (r.get("date") or "").strip()
+        date = _clean_date(r.get("date"))
         line = f"- **{test}**"
         if result:
             line += f": {result}"
@@ -263,7 +272,7 @@ def render_stage1(
 
     def format_proc(p):
         proc = (p.get("procedure") or "").strip()
-        date = (p.get("date") or "").strip()
+        date = _clean_date(p.get("date"))
         line = f"- {proc}" + (f" — {date}" if date else "")
         return line + format_evidence_inline(get_list(p, "evidence"))
 
@@ -390,17 +399,8 @@ def render_alerts(alerts, container):
 
 
 def run_audio_agent_threaded(waveform, total_samples: int, state: dict):
-    """Background-thread audio runner. Mutates the shared `state` dict
-    only — no Streamlit widget / cache calls (those aren't thread-safe).
-    The fragment polls `state["audio_progress"]` and `state["audio_done"]`
-    to render the UI.
-
-    Pace-adjusted: each iteration consumes ``STEP_SAMPLES`` worth of audio
-    (~9 s), so wall-clock time per iteration is held at ~9 s. The model's
-    actual ASR+summary time is subtracted from that budget so a faster
-    machine doesn't make the demo race ahead of real-time speech. Without
-    this, the entire visit transcript would appear in a few seconds and
-    the "live" framing breaks."""
+    # Pace each iteration to ~9 s of wall clock so transcript grows at
+    # real conversation speed even when the GPU could finish faster.
     step_seconds = STEP_SAMPLES / SAMPLE_RATE
     for start in range(0, total_samples, STEP_SAMPLES):
         if state.get("audio_stop"):
@@ -424,19 +424,12 @@ def run_audio_agent_threaded(waveform, total_samples: int, state: dict):
 
 @st.fragment(run_every="1s")
 def render_live_panel_streaming():
-    """Auto-refreshing fragment for the live-visit panel while audio is
-    being processed in a background thread. Reruns once per second so the
-    transcript and progress bar update without blocking the rest of the
-    page (right-column chat stays fully responsive)."""
     state = st.session_state.state
     placeholder = st.empty()
     render_live_transcription(state, placeholder)
     pct = float(state.get("audio_progress", 0.0))
     st.progress(pct, text=f"Streaming audio… {int(pct * 100)}%")
     if state.get("audio_done"):
-        # Audio finished while we were rendering — force a full rerun so
-        # the static "done" path takes over and surfaces the post-visit
-        # action buttons.
         st.rerun()
 
 
@@ -589,8 +582,6 @@ def main_ui():
                     st.session_state.live_transcription_started = True
                     st.session_state.state["audio_done"] = False
                     st.session_state.state["audio_progress"] = 0.0
-                    # Pre-load the waveform on the main thread (cache_data
-                    # isn't safe from a background thread), then hand off.
                     waveform = load_audio("../data/conv.wav")
                     thread = Thread(
                         target=run_audio_agent_threaded,
@@ -601,9 +592,6 @@ def main_ui():
                     st.session_state.audio_thread = thread
                     st.rerun()
             elif not st.session_state.state.get("audio_done"):
-                # Background thread is processing audio. The fragment
-                # re-renders every second; the rest of the page (chat in
-                # the right column) is not blocked.
                 render_live_panel_streaming()
             else:
                 live_placeholder = st.empty()
@@ -611,16 +599,12 @@ def main_ui():
                     st.session_state.state, live_placeholder
                 )
 
-                # Reserve placeholder positions in layout order:
-                # buttons → alerts → soap.
                 ctrl_cols = st.columns(2)
                 alerts_box = st.empty()
                 soap_box = st.empty()
 
-                # Pre-populate the placeholders from session state BEFORE
-                # the button handlers run. That way, if one button is
-                # clicked, the OTHER section's content stays visible while
-                # the spinner is up — instead of both vanishing.
+                # Pre-populate before buttons so the other section stays
+                # visible during a spinner.
                 render_alerts(st.session_state.alerts, alerts_box)
                 if st.session_state.soap_note:
                     with soap_box.container():
@@ -683,8 +667,6 @@ def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder)
         {"question": user_question, "uploaded_image_path": uploaded_path}
     )
 
-    # Pre-render the new question + a streaming placeholder so the user
-    # sees their message instantly and watches the answer build up.
     with chat_placeholder:
         for qa in st.session_state.qa_history:
             _render_chat_pair(qa)
@@ -724,8 +706,6 @@ def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder)
     }
     st.session_state.qa_history.append(qa)
 
-    # We already drew the question + assistant message inline. Add the
-    # retrieved imaging directly under the streamed answer (no expander).
     evidence_paths = [
         p
         for p in used_paths
@@ -737,9 +717,6 @@ def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder)
 
 
 def _render_chat_images(paths):
-    """Render imaging inside a chat message, sized to fit the narrow chat
-    column. One image → 220px fixed; multiple → side-by-side stretched
-    columns capped at 3 wide."""
     if not paths:
         return
     if len(paths) == 1:
@@ -757,9 +734,6 @@ def _render_chat_images(paths):
 
 
 def _render_chat_pair(qa: dict):
-    """Render one (question, answer) pair using Streamlit's native chat
-    components. Using markdown + chat_message also escapes the user's
-    text so a `<script>` tag in the question can't run."""
     with st.chat_message("user"):
         st.markdown(qa["question"])
         path = qa.get("user_image_path")

@@ -10,10 +10,7 @@ from typing import Any, Dict, List, Optional
 from json_repair import repair_json
 
 
-# Gemma 4 emits its (possibly empty) "thought" channel before the final answer:
-#   <|channel>thought\n[reasoning]<channel|>[final answer]
-# When thinking is disabled the thought block is empty but the separator is still
-# present. We split on `<channel|>` and keep the final answer.
+# Gemma 4 wraps its optional thought channel: `<channel|>thought<channel|>answer`.
 GEMMA4_THINK_SEP = "<channel|>"
 LEGACY_THINK_SEP = "<unused95>"
 
@@ -128,8 +125,6 @@ def _resolve_path_cached(candidate: str) -> Optional[str]:
 
 
 def resolve_image_path(doc) -> Optional[str]:
-    """Return an existing on-disk path for an imaging doc. Text docs have
-    no image-path metadata and are silently skipped."""
     meta = getattr(doc, "metadata", None) or {}
     for key in ("main_image_path", "image_path", "path", "file_path"):
         v = meta.get(key)
@@ -141,8 +136,6 @@ def resolve_image_path(doc) -> Optional[str]:
 
 
 def collect_image_paths(retrieved_docs_batches, max_images: int = 6) -> List[str]:
-    """Walk a list of retrieval batches (list of lists of Documents) and
-    return a deduplicated list of on-disk image paths, preserving order."""
     seen = set()
     out: List[str] = []
     for batch in retrieved_docs_batches or []:
@@ -173,16 +166,11 @@ def _normalize_section(section: Optional[str]) -> str:
 
 
 def build_source_index(*vectorstores) -> Dict[str, Dict[str, Any]]:
-    """Walk one or more FAISS vector stores and produce a mapping from
-    source identifiers (document_id / dicom_id / study_id) to a friendly
-    descriptor. Used by the UI to render evidence as e.g.
-    "Discharge note · 2024-03-01" instead of a raw UUID."""
     idx: Dict[str, Dict[str, Any]] = {}
     for vs in vectorstores:
         store = getattr(vs, "docstore", None)
         if store is None:
             continue
-        # FAISS LangChain stores expose internal dict via _dict
         items = getattr(store, "_dict", None) or {}
         for doc in items.values():
             m = getattr(doc, "metadata", {}) or {}
@@ -208,8 +196,6 @@ def format_source_label(
     fallback_date: Optional[str],
     source_index: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    """Render a single evidence reference as a short human-readable label.
-    Falls back to the raw id + date when nothing is known about the source."""
     src = (source_id or "").strip()
     date = (fallback_date or "").strip()
     info = source_index.get(src) if (source_index and src) else None
@@ -227,8 +213,7 @@ def format_source_label(
 # --- Multimodal user content --------------------------------------------
 
 def add_images_to_user_content(content, retrieved_docs, max_images=3):
-    """Add image entries to user message content for multimodal models.
-    Images are inserted before text blocks as recommended by Gemma 4 docs."""
+    # Gemma 4 docs: image entries must come before text in user content.
     if not isinstance(content, list):
         return content
 
@@ -263,6 +248,30 @@ def windowed_time_decay(
 
 # --- JSON patch ----------------------------------------------------------
 
+# Per-section primary content field: if this is blank, the item is bogus
+# even if it carries an evidence citation. Drops the empty-shell entries
+# the planner sometimes emits when a retrieved doc only mentions a topic.
+_PRIMARY_CONTENT_FIELD = {
+    "active_problems": "problem",
+    "medications": "name",
+    "recent_events": "event",
+    "allergies": "substance",
+    "key_results": "test",
+    "procedures": "procedure",
+    "pending_items": "item",
+}
+
+
+def _has_primary_content(item: Any, section: str) -> bool:
+    if not isinstance(item, dict):
+        return True
+    key = _PRIMARY_CONTENT_FIELD.get(section)
+    if not key:
+        return True
+    v = item.get(key)
+    return isinstance(v, str) and bool(v.strip())
+
+
 def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     def is_empty_item(item: dict) -> bool:
         for v in item.values():
@@ -280,11 +289,15 @@ def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, An
             continue
 
         original[section] = [
-            item for item in original[section] if not is_empty_item(item)
+            item
+            for item in original[section]
+            if not is_empty_item(item) and _has_primary_content(item, section)
         ]
 
         for item in new_items:
             if not isinstance(item, dict) or is_empty_item(item):
+                continue
+            if not _has_primary_content(item, section):
                 continue
             if item not in original[section]:
                 original[section].append(item)
@@ -306,8 +319,7 @@ _HISTORICAL_QUERY_HINTS = (
     "childhood",
 )
 
-# Reasonable fallback windows when the planner forgets to provide one,
-# keyed by substrings in the query text.
+# Fallback windows when the planner forgets to provide one, keyed by query substring.
 _DEFAULT_WINDOW_BY_HINT = (
     ("medication", 2),
     ("med list", 2),
@@ -338,8 +350,6 @@ def default_allowed_years(query: str) -> int:
 
 
 def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply guardrails to a planner JSON output: ensure `allowed_years` is
-    set for non-historical search queries, and clamp invalid actions."""
     if not isinstance(plan, dict):
         return {"action": "finish", "query": None}
     action = plan.get("action")

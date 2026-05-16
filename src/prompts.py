@@ -98,8 +98,16 @@ PROMPT_UPDATE_TEMPLATE = (
     "Rules:\n"
     "- Do not rewrite, modify, or duplicate existing entries.\n"
     "- Place each fact in the correct section (active_problems = diagnoses; key_results = labs/vitals/imaging results).\n"
+    "- Every entry MUST have its primary content field populated:\n"
+    "    active_problems → 'problem'   |  medications  → 'name'\n"
+    "    recent_events   → 'event'     |  allergies    → 'substance'\n"
+    "    key_results     → 'test'      |  procedures   → 'procedure'\n"
+    "    pending_items   → 'item'\n"
+    "  An entry with only 'evidence' and a blank primary field is INVALID — omit it entirely.\n"
     '- Each new fact MUST include "evidence" with "source_id" and "date".\n'
-    "- Use only explicit info from the documents — no inference.\n"
+    "- Use only explicit info from the documents — no inference. If a document mentions a\n"
+    "  section topic (e.g. 'discharge medications') but lists no concrete items, do not\n"
+    "  emit a placeholder entry — return nothing for that section.\n"
     "- If no new facts: return exactly {{}}.\n"
     "- Output strictly valid JSON, no commentary, no markdown."
 )

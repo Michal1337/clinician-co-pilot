@@ -11,15 +11,11 @@ from utils import parse_response_json
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 10
 CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_SECONDS
-OVERLAP_RATIO = 0.1  # 10% overlap
+OVERLAP_RATIO = 0.1
 STEP_SAMPLES = int(CHUNK_SAMPLES * (1 - OVERLAP_RATIO))
 
-# Re-summarize the conversation only every N transcribed chunks. The
-# transcript itself updates every chunk; the structured summary doesn't
-# need to keep up tick-for-tick and each summarization is a full LLM pass.
+# Gating on the structured-summary LLM pass — every Nth chunk OR a big-enough delta.
 SUMMARIZE_EVERY_N_CHUNKS = 3
-# Or whenever the transcript has grown by at least this many characters
-# since the last summarization (~30 spoken words).
 SUMMARIZE_MIN_DELTA_CHARS = 200
 
 

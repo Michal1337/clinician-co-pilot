@@ -1,20 +1,4 @@
-"""Debug script for the pre-visit summary agent.
-
-Streams ``SUMMARY_AGENT`` for a given patient and prints, at every node
-event, exactly what came out: planner action/query, retrieved-doc count
-and a peek at their content, the raw LLM response before parsing, the
-parsed JSON patch, and the running summary's populated section counts.
-
-Use this when ``Generate Summary`` in the app comes back blank — running
-the same agent here surfaces *where* the chain breaks (planner returning
-``finish`` immediately, retrieval returning 0 docs, the model's JSON
-patch failing to parse, etc.).
-
-    cd src
-    python debug_summary.py                  # default subject 13221453
-    python debug_summary.py --subject-id 10006580
-    python debug_summary.py --subject-id 13221453 --raw     # dump raw model output too
-"""
+# Debug streamer for SUMMARY_AGENT. Run from src/: `python debug_summary.py [--raw]`.
 
 import argparse
 import json
@@ -48,8 +32,6 @@ def _item_populated(it) -> bool:
     if isinstance(it, str):
         return bool(it.strip())
     if isinstance(it, dict):
-        # A template skeleton has all string fields blank. Treat the item as
-        # populated if any non-evidence string field is non-empty.
         for k, v in it.items():
             if k == "evidence":
                 continue
@@ -60,7 +42,6 @@ def _item_populated(it) -> bool:
 
 
 def summary_section_counts(summary: dict) -> dict:
-    """How many populated items per section. Empty summary => all 0s."""
     if not isinstance(summary, dict):
         return {}
     out = {}
@@ -82,10 +63,6 @@ def print_planner_event(state: dict, raw: bool):
     print(f"  action:        {state.get('action')!r}")
     print(f"  query:         {state.get('query')!r}")
     print(f"  allowed_years: {state.get('allowed_years')!r}")
-    # history = state.get("action_history") or []
-    # if history:
-    #     last = history[-1]
-    #     print(f"  last decision: {trunc(pformat(last), 300)}")
 
 
 def print_retrieval_event(state: dict):
@@ -110,7 +87,6 @@ def print_retrieval_event(state: dict):
 
 
 def print_update_event(state: dict):
-    """update_summary just sets `summary`. Show what's populated now."""
     counts = summary_section_counts(state.get("summary") or {})
     print("UPDATE SUMMARY")
     print(f"  section item counts: {counts}")
@@ -121,24 +97,13 @@ def print_update_event(state: dict):
 
 
 def print_event(node: str, state: dict, raw: bool):
-    # hr("·")
-    # print(f"NODE: {node}")
     if node == "reason_and_plan":
         print_planner_event(state, raw=raw)
-    # elif node in ("text_vector_search", "image_vector_search"):
-    #     print_retrieval_event(state)
-    # elif node == "update_summary":
-    #     print_update_event(state)
-    # else:
-    #     print(trunc(pformat({k: state.get(k) for k in state if k != "audio_chunk"}), 800))
 
 
 # --- vLLM connectivity check -------------------------------------------
 
 def vllm_sanity() -> bool:
-    """Verify the vLLM endpoint is up and serving the expected model name.
-    Returns True on success; prints a diagnostic and returns False on
-    failure so callers can short-circuit before doing real work."""
     hr("=")
     print("vLLM CONNECTIVITY CHECK")
     print(f"  endpoint:    {VLLM_URL}")
@@ -169,9 +134,6 @@ def vllm_sanity() -> bool:
 # --- vector store sanity check -----------------------------------------
 
 def vstore_sanity(subject_id: int):
-    """Hit each vector store with a generic query and count subject-filtered
-    matches. Helps distinguish 'no patient data indexed' from 'agent never
-    asked for it'."""
     hr("=")
     print("VECTOR STORE SANITY CHECK")
     try:
@@ -200,9 +162,6 @@ def vstore_sanity(subject_id: int):
 # --- raw planner probe --------------------------------------------------
 
 def raw_planner_probe(state: dict):
-    """Run *one* planner step manually and dump the raw model output before
-    JSON parsing — the most common silent failure is the model emitting
-    text that doesn't survive ``parse_response_json``."""
     hr("=")
     print("RAW PLANNER PROBE (one shot, no graph)")
     messages = [
@@ -220,7 +179,6 @@ def raw_planner_probe(state: dict):
         },
     ]
     response = PIPE(messages, do_sample=False, max_new_tokens=2000)
-    # Try to pull the assistant text out of the HF pipeline response
     try:
         assistant_blob = response[0]["generated_text"]
         if isinstance(assistant_blob, list):

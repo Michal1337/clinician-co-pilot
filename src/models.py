@@ -1,20 +1,3 @@
-"""Model wiring.
-
-The LLM (Gemma 4) is served by **vLLM** behind an OpenAI-compatible HTTP
-API for throughput; we adapt it back into a `PIPE(messages, ...)` shape
-so every existing call site in `agent_demo.py` / `audio_agent.py` keeps
-working without changes. ASR stays on the HuggingFace transformers
-pipeline because vLLM does not serve speech models.
-
-Start the vLLM server in a separate shell before launching the app:
-
-    CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26B-A4B-it \\
-        --port 8000 --max-model-len 32768 --dtype bfloat16 \\
-        --gpu-memory-utilization 0.9
-
-Override the endpoint via ``CLINICIAN_VLLM_URL`` if it lives elsewhere.
-"""
-
 import base64
 import os
 from typing import Any, Dict, Iterator, List
@@ -28,14 +11,8 @@ LLM_MODEL = 'google/gemma-4-26B-A4B-it'
 ASR_MODEL = resolve_model(os.environ.get("CLINICIAN_ASR", "google/medasr"))
 ASR_DEVICE = os.environ.get("CLINICIAN_ASR_DEVICE", "cuda:1")
 
-# vLLM endpoint: the app talks to it as if it were OpenAI. Auth is unused
-# in the default local-serve mode, but the SDK requires *some* key.
 VLLM_URL = os.environ.get("CLINICIAN_VLLM_URL", "http://localhost:8000/v1")
 VLLM_API_KEY = os.environ.get("CLINICIAN_VLLM_API_KEY", "EMPTY")
-# The "model name" the client sends. vLLM serves whatever you passed to
-# `vllm serve`; we default to the same id so they match. If you start
-# vllm with `--served-model-name clinician-llm`, set CLINICIAN_LLM_SERVED
-# to "clinician-llm" so the client request matches.
 LLM_SERVED_NAME = os.environ.get("CLINICIAN_LLM_SERVED", LLM_MODEL)
 
 
@@ -52,9 +29,6 @@ def _encode_image_to_data_uri(path: str) -> str:
 
 
 def _to_oai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Convert HF transformers chat shape to OpenAI chat shape, inlining
-    local image paths as data URIs so vLLM can read them without filesystem
-    access."""
     out: List[Dict[str, Any]] = []
     for m in messages:
         role = m.get("role", "user")
@@ -84,11 +58,7 @@ def _to_oai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         {"type": "image_url", "image_url": {"url": url}}
                     )
                     has_image = True
-        # Unwrap text-only content to a plain string. Some OpenAI-compatible
-        # servers (including certain vLLM builds) are strict about the
-        # list-of-parts shape and only accept it for genuinely multimodal
-        # messages; passing list-content for a pure-text turn can fail in
-        # subtle ways (e.g. response coming back as a raw string).
+        # Some vLLM builds reject list-content for text-only turns.
         if not has_image:
             merged = "".join(p.get("text", "") for p in parts if p.get("type") == "text")
             out.append({"role": role, "content": merged})
@@ -100,10 +70,6 @@ def _to_oai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _extract_completion_text(resp: Any) -> str:
-    """Pull assistant text from an OpenAI-style ChatCompletion. Surfaces
-    a clear error if the shape is unexpected — some vLLM error paths
-    return a raw string and the old ``resp.choices[0]`` crash hides
-    what's actually being said."""
     if isinstance(resp, str):
         raise RuntimeError(
             "vLLM returned a string instead of a ChatCompletion. "
@@ -125,13 +91,6 @@ def _temperature(do_sample: bool) -> float:
 
 
 class _VLLMPipe:
-    """Drop-in for the HF `pipeline("image-text-to-text")` shape.
-
-    Returns ``[{"generated_text": <messages + assistant reply>}]`` so the
-    existing ``parse_response_json`` / ``extract_assistant_text`` helpers
-    in `utils.py` keep working without modification.
-    """
-
     model_name = LLM_SERVED_NAME
 
     def __call__(
@@ -162,7 +121,6 @@ class _VLLMPipe:
         max_new_tokens: int = 2000,
         do_sample: bool = False,
     ) -> Iterator[str]:
-        """Yield assistant-content deltas via OpenAI streaming."""
         oai_messages = _to_oai_messages(messages)
         stream = _client.chat.completions.create(
             model=self.model_name,

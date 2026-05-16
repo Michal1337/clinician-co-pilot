@@ -1,10 +1,3 @@
-"""Build the text and imaging vector stores from one or more patient
-history JSONs in ``../data/``.
-
-Picks up every file matching ``../data/patient_*_history.json`` so the app
-can be served for any number of patients without code changes.
-"""
-
 import glob
 import json
 import os
@@ -26,9 +19,6 @@ splitter = RecursiveCharacterTextSplitter(
 
 
 def _normalize_image_path(p: str) -> str:
-    """Image paths in the JSONs may be saved relative to ``data/`` (the
-    extraction script's CWD). Make them resolvable from ``src/`` by
-    prefixing ``../data/`` when the path doesn't already exist as-is."""
     if not p:
         return p
     if os.path.isabs(p) or os.path.exists(p):
