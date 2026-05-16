@@ -44,16 +44,38 @@ class AgentState(TypedDict):
     last_summary_at_len: int
 
 
+def _stitch_chunk(full: str, chunk: str, max_overlap_words: int = 8) -> str:
+    """Append a fresh ASR chunk to the running transcript, removing any
+    word-level overlap (chunks share ~10% audio so the last few words of
+    `full` and the first few of `chunk` often duplicate)."""
+    chunk = (chunk or "").strip()
+    if not chunk:
+        return full
+    if not full:
+        return chunk
+    tail = full.split()[-max_overlap_words:]
+    head = chunk.split()
+    overlap = 0
+    for k in range(min(len(tail), len(head)), 0, -1):
+        if [w.lower() for w in tail[-k:]] == [w.lower() for w in head[:k]]:
+            overlap = k
+            break
+    deduped = " ".join(head[overlap:])
+    if not deduped:
+        return full
+    sep = "" if full.endswith((" ", "\n")) else " "
+    return full + sep + deduped
+
+
 def node_transcribe(state: AgentState):
     waveform = state["audio_chunk"]
-
     result = PIPE_ASR(waveform, sampling_rate=SAMPLE_RATE)
-    text = result["text"]
+    chunk_text = result["text"] or ""
 
-    updated_transcript = state["full_transcript"] + text[:-4]
+    updated_transcript = _stitch_chunk(state["full_transcript"], chunk_text)
 
     return {
-        "transcript_chunk": text,
+        "transcript_chunk": chunk_text,
         "full_transcript": updated_transcript,
         "chunk_count": state.get("chunk_count", 0) + 1,
     }

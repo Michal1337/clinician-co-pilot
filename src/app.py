@@ -427,8 +427,6 @@ def render_live_panel_streaming():
     state = st.session_state.state
     placeholder = st.empty()
     render_live_transcription(state, placeholder)
-    pct = float(state.get("audio_progress", 0.0))
-    st.progress(pct, text=f"Streaming audio… {int(pct * 100)}%")
     if state.get("audio_done"):
         st.rerun()
 
