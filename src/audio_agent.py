@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Literal, TypedDict
 
 import numpy as np
@@ -44,20 +45,35 @@ class AgentState(TypedDict):
     last_summary_at_len: int
 
 
+_SPECIAL_TOKEN_RE = re.compile(r"</?s>|<\|[^|>]*\|>")
+
+
+def _clean_chunk(text: str) -> str:
+    text = _SPECIAL_TOKEN_RE.sub(" ", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+_NORM_STRIP = ".,!?:;\"'()[]"
+
+
+def _norm_word(w: str) -> str:
+    return w.lower().strip(_NORM_STRIP)
+
+
 def _stitch_chunk(full: str, chunk: str, max_overlap_words: int = 8) -> str:
-    """Append a fresh ASR chunk to the running transcript, removing any
-    word-level overlap (chunks share ~10% audio so the last few words of
-    `full` and the first few of `chunk` often duplicate)."""
-    chunk = (chunk or "").strip()
+    chunk = _clean_chunk(chunk)
     if not chunk:
         return full
     if not full:
         return chunk
     tail = full.split()[-max_overlap_words:]
     head = chunk.split()
+    tail_norm = [_norm_word(w) for w in tail]
+    head_norm = [_norm_word(w) for w in head]
     overlap = 0
     for k in range(min(len(tail), len(head)), 0, -1):
-        if [w.lower() for w in tail[-k:]] == [w.lower() for w in head[:k]]:
+        if tail_norm[-k:] == head_norm[:k] and all(tail_norm[-k:]):
             overlap = k
             break
     deduped = " ".join(head[overlap:])

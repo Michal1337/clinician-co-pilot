@@ -59,9 +59,14 @@ def get_source_index():
 
 
 @st.cache_data(show_spinner=False)
-def load_audio(audio_path: str):
+def _load_audio_cached(audio_path: str, mtime: float):
     waveform, _ = librosa.load(audio_path, sr=16000)
     return waveform
+
+
+def load_audio(audio_path: str):
+    # Pass mtime into the cache key so an updated conv.wav invalidates it.
+    return _load_audio_cached(audio_path, os.path.getmtime(audio_path))
 
 
 @st.cache_data(show_spinner=False)
