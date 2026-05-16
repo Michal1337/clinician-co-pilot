@@ -693,7 +693,7 @@ def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder)
         with st.chat_message("user"):
             st.markdown(user_question)
             if uploaded_path and os.path.exists(uploaded_path):
-                st.image(uploaded_path, caption="Your attachment", width=320)
+                st.image(uploaded_path, caption="Your attachment", width=220)
         assistant_msg = st.chat_message("assistant")
         answer_placeholder = assistant_msg.empty()
         answer_placeholder.markdown("_Retrieving evidence…_")
@@ -726,9 +726,8 @@ def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder)
     }
     st.session_state.qa_history.append(qa)
 
-    # We already drew the question + assistant message inline. The only
-    # missing piece is the "imaging the agent referenced" expander; add it
-    # now under the streamed answer so this render matches future ones.
+    # We already drew the question + assistant message inline. Add the
+    # retrieved imaging directly under the streamed answer (no expander).
     evidence_paths = [
         p
         for p in used_paths
@@ -736,13 +735,27 @@ def handle_chat_submission(user_question: str, uploaded_image, chat_placeholder)
     ]
     if evidence_paths:
         with assistant_msg:
-            with st.expander("🩻 Imaging the agent referenced", expanded=False):
-                cols = st.columns(min(len(evidence_paths), 3))
-                for col, p in zip(cols, evidence_paths):
-                    try:
-                        col.image(p, caption=os.path.basename(p), width="stretch")
-                    except Exception as e:
-                        col.warning(f"Could not load {p}: {e}")
+            _render_chat_images(evidence_paths)
+
+
+def _render_chat_images(paths):
+    """Render imaging inside a chat message, sized to fit the narrow chat
+    column. One image → 220px fixed; multiple → side-by-side stretched
+    columns capped at 3 wide."""
+    if not paths:
+        return
+    if len(paths) == 1:
+        try:
+            st.image(paths[0], width=220)
+        except Exception as e:
+            st.warning(f"Could not load {paths[0]}: {e}")
+        return
+    cols = st.columns(min(len(paths), 3))
+    for col, p in zip(cols, paths):
+        try:
+            col.image(p, width="stretch")
+        except Exception as e:
+            col.warning(f"Could not load {p}: {e}")
 
 
 def _render_chat_pair(qa: dict):
@@ -753,7 +766,7 @@ def _render_chat_pair(qa: dict):
         st.markdown(qa["question"])
         path = qa.get("user_image_path")
         if path and os.path.exists(path):
-            st.image(path, caption="Your attachment", width=320)
+            st.image(path, caption="Your attachment", width=220)
 
     with st.chat_message("assistant"):
         st.markdown(qa.get("answer") or "_(no answer)_")
@@ -762,14 +775,7 @@ def _render_chat_pair(qa: dict):
             for p in qa.get("evidence_image_paths", []) or []
             if p and p != qa.get("user_image_path") and os.path.exists(p)
         ]
-        if evidence_paths:
-            with st.expander("🩻 Imaging the agent referenced", expanded=False):
-                cols = st.columns(min(len(evidence_paths), 3))
-                for col, p in zip(cols, evidence_paths):
-                    try:
-                        col.image(p, caption=os.path.basename(p), width="stretch")
-                    except Exception as e:
-                        col.warning(f"Could not load {p}: {e}")
+        _render_chat_images(evidence_paths)
 
 
 def render_chat_history(chat_placeholder):
