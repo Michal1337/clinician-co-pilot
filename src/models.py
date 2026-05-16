@@ -38,13 +38,6 @@ VLLM_API_KEY = os.environ.get("CLINICIAN_VLLM_API_KEY", "EMPTY")
 # to "clinician-llm" so the client request matches.
 LLM_SERVED_NAME = os.environ.get("CLINICIAN_LLM_SERVED", LLM_MODEL)
 
-# Sampling: deterministic by default. Greedy decoding (T=0) + fixed seed
-# means the planner, summary, alerts, SOAP draft, and chat are all
-# reproducible — same inputs → same outputs. Critical for re-recording
-# the demo video and debugging the agent.
-LLM_TEMPERATURE = float(os.environ.get("CLINICIAN_LLM_TEMPERATURE", "0.0"))
-LLM_SEED = int(os.environ.get("CLINICIAN_LLM_SEED", "0"))
-
 
 _client = OpenAI(base_url=VLLM_URL, api_key=VLLM_API_KEY)
 
@@ -127,17 +120,16 @@ def _extract_completion_text(resp: Any) -> str:
         ) from e
 
 
+def _temperature(do_sample: bool) -> float:
+    return 0.7 if do_sample else 0.0
+
+
 class _VLLMPipe:
     """Drop-in for the HF `pipeline("image-text-to-text")` shape.
 
     Returns ``[{"generated_text": <messages + assistant reply>}]`` so the
     existing ``parse_response_json`` / ``extract_assistant_text`` helpers
     in `utils.py` keep working without modification.
-
-    All calls use ``temperature=LLM_TEMPERATURE`` (default 0) and a fixed
-    ``seed`` so agent behaviour is deterministic. Any ``do_sample`` /
-    ``temperature`` kwargs passed by older call sites are swallowed by
-    ``**_`` and ignored — the policy lives in one place.
     """
 
     model_name = LLM_SERVED_NAME
@@ -146,6 +138,7 @@ class _VLLMPipe:
         self,
         messages: List[Dict[str, Any]],
         max_new_tokens: int = 2000,
+        do_sample: bool = False,
         **_: Any,
     ) -> List[Dict[str, Any]]:
         oai_messages = _to_oai_messages(messages)
@@ -153,8 +146,7 @@ class _VLLMPipe:
             model=self.model_name,
             messages=oai_messages,
             max_tokens=max_new_tokens,
-            temperature=LLM_TEMPERATURE,
-            seed=LLM_SEED,
+            temperature=_temperature(do_sample),
         )
         text = _extract_completion_text(resp)
         return [
@@ -168,7 +160,7 @@ class _VLLMPipe:
         self,
         messages: List[Dict[str, Any]],
         max_new_tokens: int = 2000,
-        **_: Any,
+        do_sample: bool = False,
     ) -> Iterator[str]:
         """Yield assistant-content deltas via OpenAI streaming."""
         oai_messages = _to_oai_messages(messages)
@@ -176,8 +168,7 @@ class _VLLMPipe:
             model=self.model_name,
             messages=oai_messages,
             max_tokens=max_new_tokens,
-            temperature=LLM_TEMPERATURE,
-            seed=LLM_SEED,
+            temperature=_temperature(do_sample),
             stream=True,
         )
         for chunk in stream:
