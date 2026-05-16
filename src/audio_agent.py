@@ -15,11 +15,6 @@ CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_SECONDS
 OVERLAP_RATIO = 0.1
 STEP_SAMPLES = int(CHUNK_SAMPLES * (1 - OVERLAP_RATIO))
 
-# MedASR drops the first ~6 s of every inference. Prepend silence so the
-# truncation lands in silence instead of speech.
-_ASR_WARMUP_PAD_SECONDS = 7
-_ASR_WARMUP_PAD_SAMPLES = SAMPLE_RATE * _ASR_WARMUP_PAD_SECONDS
-
 # Gating on the structured-summary LLM pass — every Nth chunk OR a big-enough delta.
 SUMMARIZE_EVERY_N_CHUNKS = 3
 SUMMARIZE_MIN_DELTA_CHARS = 200
@@ -50,11 +45,14 @@ class AgentState(TypedDict):
     last_summary_at_len: int
 
 
-_SPECIAL_TOKEN_RE = re.compile(r"</?s>|<\|[^|>]*\|>")
+_SPECIAL_TOKEN_RE = re.compile(r"</?s>|<\|[^|>]*\|>|\{[^}]*\}")
+_STRAY_BRACKET_RE = re.compile(r"\s*[\[\]]\s*")
 
 
 def _clean_chunk(text: str) -> str:
     text = _SPECIAL_TOKEN_RE.sub(" ", text or "")
+    text = _STRAY_BRACKET_RE.sub(" ", text)
+    text = re.sub(r"\s+([.,!?:;])", r"\1", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -90,10 +88,14 @@ def _stitch_chunk(full: str, chunk: str, max_overlap_words: int = 8) -> str:
 
 def node_transcribe(state: AgentState):
     waveform = state["audio_chunk"]
-    padded = np.concatenate(
-        [np.zeros(_ASR_WARMUP_PAD_SAMPLES, dtype=waveform.dtype), waveform]
+    # chunk_length_s=20, stride_length_s=2 are the values explicitly
+    # recommended by the google/medasr model card.
+    result = PIPE_ASR(
+        waveform,
+        sampling_rate=SAMPLE_RATE,
+        chunk_length_s=20,
+        stride_length_s=2,
     )
-    result = PIPE_ASR(padded, sampling_rate=SAMPLE_RATE)
     chunk_text = result["text"] or ""
 
     updated_transcript = _stitch_chunk(state["full_transcript"], chunk_text)

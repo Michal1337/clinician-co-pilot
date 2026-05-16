@@ -3,7 +3,6 @@
 # data/conv.wav directly.
 
 import argparse
-import os
 import time
 
 import librosa
@@ -15,14 +14,6 @@ from audio_agent import (
     SAMPLE_RATE,
     STEP_SAMPLES,
 )
-
-
-def _default_audio() -> str:
-    for ext in (".mp3", ".wav", ".flac", ".m4a", ".ogg"):
-        p = f"../data/conv{ext}"
-        if os.path.exists(p):
-            return p
-    return "../data/conv.wav"
 
 
 def make_state(num_retriev_text: int = 0, num_retriev_img: int = 0):
@@ -52,7 +43,7 @@ def make_state(num_retriev_text: int = 0, num_retriev_img: int = 0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--audio", default=_default_audio())
+    ap.add_argument("--audio", default="../data/conv.wav")
     ap.add_argument(
         "--no-summary",
         action="store_true",
