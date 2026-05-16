@@ -74,6 +74,7 @@ def _to_oai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
 
         parts: List[Dict[str, Any]] = []
+        has_image = False
         for p in content:
             if not isinstance(p, dict):
                 continue
@@ -89,10 +90,41 @@ def _to_oai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     parts.append(
                         {"type": "image_url", "image_url": {"url": url}}
                     )
-        if not parts:
-            parts = [{"type": "text", "text": ""}]
-        out.append({"role": role, "content": parts})
+                    has_image = True
+        # Unwrap text-only content to a plain string. Some OpenAI-compatible
+        # servers (including certain vLLM builds) are strict about the
+        # list-of-parts shape and only accept it for genuinely multimodal
+        # messages; passing list-content for a pure-text turn can fail in
+        # subtle ways (e.g. response coming back as a raw string).
+        if not has_image:
+            merged = "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+            out.append({"role": role, "content": merged})
+        else:
+            if not parts:
+                parts = [{"type": "text", "text": ""}]
+            out.append({"role": role, "content": parts})
     return out
+
+
+def _extract_completion_text(resp: Any) -> str:
+    """Pull assistant text from an OpenAI-style ChatCompletion. Surfaces
+    a clear error if the shape is unexpected — some vLLM error paths
+    return a raw string and the old ``resp.choices[0]`` crash hides
+    what's actually being said."""
+    if isinstance(resp, str):
+        raise RuntimeError(
+            "vLLM returned a string instead of a ChatCompletion. "
+            f"First 500 chars: {resp[:500]!r}"
+        )
+    choices = getattr(resp, "choices", None)
+    if not choices:
+        return ""
+    try:
+        return choices[0].message.content or ""
+    except (AttributeError, IndexError) as e:
+        raise RuntimeError(
+            f"Unexpected vLLM response shape ({type(resp).__name__}): {resp!r}"
+        ) from e
 
 
 class _VLLMPipe:
@@ -124,7 +156,7 @@ class _VLLMPipe:
             temperature=LLM_TEMPERATURE,
             seed=LLM_SEED,
         )
-        text = (resp.choices[0].message.content or "") if resp.choices else ""
+        text = _extract_completion_text(resp)
         return [
             {
                 "generated_text": list(messages)
