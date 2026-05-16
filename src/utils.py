@@ -272,6 +272,22 @@ def _has_primary_content(item: Any, section: str) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
 
+def _has_evidence(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return True
+    evs = item.get("evidence")
+    if not isinstance(evs, list) or not evs:
+        return False
+    for ev in evs:
+        if not isinstance(ev, dict):
+            continue
+        src = (ev.get("source_id") or "").strip()
+        date = (ev.get("date") or "").strip()
+        if src or date:
+            return True
+    return False
+
+
 def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     def is_empty_item(item: dict) -> bool:
         for v in item.values():
@@ -291,13 +307,17 @@ def apply_patch(original: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, An
         original[section] = [
             item
             for item in original[section]
-            if not is_empty_item(item) and _has_primary_content(item, section)
+            if not is_empty_item(item)
+            and _has_primary_content(item, section)
+            and _has_evidence(item)
         ]
 
         for item in new_items:
             if not isinstance(item, dict) or is_empty_item(item):
                 continue
             if not _has_primary_content(item, section):
+                continue
+            if not _has_evidence(item):
                 continue
             if item not in original[section]:
                 original[section].append(item)
