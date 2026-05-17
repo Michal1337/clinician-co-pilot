@@ -584,7 +584,7 @@ def main_ui():
                     st.session_state.live_transcription_started = True
                     st.session_state.state["audio_done"] = False
                     st.session_state.state["audio_progress"] = 0.0
-                    waveform = load_audio("../data/conv.wav")
+                    waveform = load_audio("../data/conv.mp3")
                     thread = Thread(
                         target=run_audio_agent_threaded,
                         args=(waveform, len(waveform), st.session_state.state),

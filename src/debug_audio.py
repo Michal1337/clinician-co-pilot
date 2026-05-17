@@ -43,7 +43,7 @@ def make_state(num_retriev_text: int = 0, num_retriev_img: int = 0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--audio", default="../data/conv.wav")
+    ap.add_argument("--audio", default="../data/conv.mp3")
     ap.add_argument(
         "--no-summary",
         action="store_true",
